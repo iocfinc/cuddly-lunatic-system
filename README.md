@@ -52,6 +52,8 @@ Telegram notifications are local-only and disabled by default.
    TELEGRAM_CHAT_ID=replace-with-real-chat-id
    ```
 
+   For a public channel, use its `@channel_username`. For a private channel, the display name or invite link is not enough; add the bot as a channel admin and use the numeric chat id that starts with `-100`.
+
 3. Validate formatting without network delivery:
 
    ```sh
@@ -62,6 +64,12 @@ Telegram notifications are local-only and disabled by default.
 
    ```sh
    uv --cache-dir .uv-cache run python scripts/telegram_notify.py --post "Quant Researcher Desk Telegram test"
+   ```
+
+   To validate Telegram text formatting, pass a parse mode and formatted body:
+
+   ```sh
+   uv --cache-dir .uv-cache run python scripts/telegram_notify.py --post --parse-mode HTML $'<b>Quant Researcher Desk</b>\nTelegram formatting test'
    ```
 
 Real Telegram credentials belong only in `.env`, which is ignored by Git. Git hooks call Telegram only after preflight failure and only when notifications are enabled.
