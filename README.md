@@ -32,7 +32,13 @@ Run the scaffold preflight before handing off changes:
 uv run python scripts/preflight.py --hook manual
 ```
 
-For documentation-only changes, also read the affected Markdown files and check headings, examples, and links manually. No product build or test suite exists yet beyond the scaffold preflight.
+Run product unit tests after code changes:
+
+```sh
+uv --cache-dir .uv-cache run pytest
+```
+
+For documentation-only changes, also read the affected Markdown files and check headings, examples, and links manually.
 
 ## Telegram Notifications
 
@@ -73,6 +79,34 @@ Telegram notifications are local-only and disabled by default.
    ```
 
 Real Telegram credentials belong only in `.env`, which is ignored by Git. Git hooks call Telegram only after preflight failure and only when notifications are enabled.
+
+## Moomoo OpenD Options Report
+
+The TSMC options report uses the local Moomoo OpenD quote API through `moomoo-api`. It does not place orders and does not unlock trading.
+
+1. Start Moomoo OpenD locally and log in.
+
+2. Confirm `.env` contains the local OpenD connection defaults:
+
+   ```sh
+   MOOMOO_OPEND_HOST=127.0.0.1
+   MOOMOO_OPEND_PORT=11111
+   MOOMOO_DEFAULT_SYMBOL=US.TSM
+   ```
+
+3. Build the Telegram-formatted report without posting:
+
+   ```sh
+   uv --cache-dir .uv-cache run python scripts/send_tsmc_options_report.py --dry-run
+   ```
+
+4. After Telegram credentials are configured, send the report:
+
+   ```sh
+   uv --cache-dir .uv-cache run python scripts/send_tsmc_options_report.py --post --symbol US.TSM --rows 5
+   ```
+
+The message includes the selected expiry, scanned contract count, top calls and puts by volume, open interest, then strike proximity, and a research-only risk note.
 
 ## Agentic Stack
 
