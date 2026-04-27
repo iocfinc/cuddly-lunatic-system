@@ -1,0 +1,37 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+.venv/
+.uv-cache/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Product runtime outputs
+data/
+reports/
+journal/
+snapshots/
+
+# Local agentic-stack runtime state
+.agent/
+.agents/
+.agentic/
+agentic-stack/
+agentic-stack.log
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/

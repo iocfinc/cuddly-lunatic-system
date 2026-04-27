@@ -1,0 +1,13 @@
+[project]
+name = "quant-researcher-desk"
+version = "0.1.0"
+description = "Personal quantitative research system for daily options analysis and report generation."
+readme = "AGENTS.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv]
+package = false
+
+[tool.quant-researcher-desk]
+status = "planning-scaffold"
