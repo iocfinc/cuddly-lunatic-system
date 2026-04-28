@@ -1,0 +1,4 @@
+notify = ["python3", "scripts/telegram_notify.py", "--post"]
+
+[features]
+codex_hooks = true
