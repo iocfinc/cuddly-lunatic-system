@@ -12,6 +12,7 @@ from quant_researcher_desk.moomoo_options_report import (  # noqa: E402
     build_options_report,
     format_telegram_html,
     nearest_expiry,
+    target_expiry,
 )
 
 
@@ -54,6 +55,18 @@ class FakeQuoteClient:
 
 def test_nearest_expiry_selects_future_date() -> None:
     assert nearest_expiry(["2026-04-24", "2026-05-08", "2026-05-01"], today=dt.date(2026, 4, 28)) == "2026-05-01"
+
+
+def test_target_expiry_selects_proactive_window_and_skips_same_day() -> None:
+    assert (
+        target_expiry(
+            ["2026-04-29", "2026-05-01", "2026-05-06", "2026-05-15"],
+            today=dt.date(2026, 4, 29),
+            minimum_days_out=5,
+            target_days_out=7,
+        )
+        == "2026-05-06"
+    )
 
 
 def test_build_options_report_ranks_by_volume_open_interest_then_strike_distance() -> None:

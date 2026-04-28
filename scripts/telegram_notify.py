@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import mimetypes
 import pathlib
 import re
 import sys
+import uuid
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -15,6 +17,7 @@ import urllib.request
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 SECRET_KEYS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
 PRIVATE_CHANNEL_PREFIX = "-100"
+MAX_EVENT_TEXT_LENGTH = 700
 
 
 class TelegramSendError(Exception):
@@ -52,16 +55,73 @@ def stdin_payload() -> str:
     return sys.stdin.read().strip()
 
 
+def truncate_text(text: str, limit: int = MAX_EVENT_TEXT_LENGTH) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: limit - 1].rstrip()}..."
+
+
+def html_line(label: str, value: object) -> str:
+    return f"<b>{html_escape(label)}:</b> {html_escape(value)}"
+
+
+def html_escape(value: object) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def format_codex_event(data: dict[str, object]) -> str | None:
+    event_type = str(data.get("type", "")).strip()
+    if not event_type:
+        return None
+
+    title_by_type = {
+        "agent-turn-complete": "✅ Agent Turn Complete",
+        "agent-turn-start": "🚀 Agent Turn Started",
+        "task-started": "🚀 Task Started",
+        "task-complete": "✅ Task Complete",
+        "error": "🚨 Codex Error",
+    }
+    title = title_by_type.get(event_type, f"🤖 Codex Event · {event_type.replace('-', ' ').title()}")
+    lines = [f"<b>{html_escape(title)}</b>"]
+
+    cwd = data.get("cwd")
+    if cwd:
+        lines.append(html_line("Repo", pathlib.Path(str(cwd)).name))
+    client = data.get("client")
+    if client:
+        lines.append(html_line("Client", client))
+    turn_id = data.get("turn-id") or data.get("turn_id")
+    if turn_id:
+        lines.append(html_line("Turn", str(turn_id)[:12]))
+
+    input_messages = data.get("input-messages") or data.get("input_messages")
+    if isinstance(input_messages, list) and input_messages:
+        latest = str(input_messages[-1])
+        lines.extend(["", f"📝 <b>Prompt</b>\n{html_escape(truncate_text(latest))}"])
+    elif data.get("message"):
+        lines.extend(["", html_escape(truncate_text(str(data["message"])))])
+
+    return "\n".join(lines)
+
+
 def normalize_message(cli_parts: list[str], stdin_text: str) -> str:
-    if cli_parts:
-        return " ".join(cli_parts).strip()
-    if not stdin_text:
+    raw_text = " ".join(cli_parts).strip() if cli_parts else stdin_text
+    if not raw_text:
         return ""
     try:
-        data = json.loads(stdin_text)
+        data = json.loads(raw_text)
     except json.JSONDecodeError:
-        return stdin_text
+        return raw_text
     if isinstance(data, dict):
+        event_message = format_codex_event(data)
+        if event_message:
+            return event_message
         for key in ("message", "text", "summary", "title"):
             if key in data and data[key]:
                 return str(data[key])
@@ -111,6 +171,110 @@ def post_telegram(token: str, chat_id: str, message: str, parse_mode: str = "") 
         raise TelegramSendError(f"{description}. {chat_id_hint(chat_id)}") from exc
 
 
+def _raise_telegram_error(exc: urllib.error.HTTPError, chat_id: str) -> None:
+    raw_body = exc.read().decode("utf-8", errors="replace")
+    description = raw_body
+    try:
+        body = json.loads(raw_body)
+    except json.JSONDecodeError:
+        body = {}
+    if isinstance(body, dict) and body.get("description"):
+        description = str(body["description"])
+    raise TelegramSendError(f"{description}. {chat_id_hint(chat_id)}") from exc
+
+
+def _multipart_form_data(fields: dict[str, str], files: dict[str, pathlib.Path]) -> tuple[bytes, str]:
+    boundary = f"----quant-researcher-desk-{uuid.uuid4().hex}"
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode("utf-8"),
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"),
+                str(value).encode("utf-8"),
+                b"\r\n",
+            ]
+        )
+    for name, path in files.items():
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        chunks.extend(
+            [
+                f"--{boundary}\r\n".encode("utf-8"),
+                (
+                    f'Content-Disposition: form-data; name="{name}"; '
+                    f'filename="{path.name}"\r\n'
+                ).encode("utf-8"),
+                f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"),
+                path.read_bytes(),
+                b"\r\n",
+            ]
+        )
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(chunks), boundary
+
+
+def post_telegram_document(
+    token: str,
+    chat_id: str,
+    document_path: str | pathlib.Path,
+    caption: str = "",
+    parse_mode: str = "",
+) -> None:
+    path = pathlib.Path(document_path)
+    if not path.is_file():
+        raise TelegramSendError(f"Telegram document does not exist: {path}")
+
+    url = f"https://api.telegram.org/bot{token}/sendDocument"
+    fields = {"chat_id": chat_id}
+    if caption:
+        fields["caption"] = caption
+    if parse_mode:
+        fields["parse_mode"] = parse_mode
+    body, boundary = _multipart_form_data(fields, {"document": path})
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        _raise_telegram_error(exc, chat_id)
+
+
+def post_telegram_photo(
+    token: str,
+    chat_id: str,
+    photo_path: str | pathlib.Path,
+    caption: str = "",
+    parse_mode: str = "",
+) -> None:
+    path = pathlib.Path(photo_path)
+    if not path.is_file():
+        raise TelegramSendError(f"Telegram photo does not exist: {path}")
+
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    fields = {"chat_id": chat_id}
+    if caption:
+        fields["caption"] = caption
+    if parse_mode:
+        fields["parse_mode"] = parse_mode
+    body, boundary = _multipart_form_data(fields, {"photo": path})
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response.read()
+    except urllib.error.HTTPError as exc:
+        _raise_telegram_error(exc, chat_id)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Send a Telegram notification.")
     parser.add_argument("--dry-run", action="store_true", help="Print the redacted message without posting.")
@@ -121,6 +285,8 @@ def main() -> int:
         default="",
         help="Optional Telegram parse_mode for formatted messages.",
     )
+    parser.add_argument("--document", type=pathlib.Path, help="Attach a local file with Telegram sendDocument.")
+    parser.add_argument("--photo", type=pathlib.Path, help="Attach a local image with Telegram sendPhoto.")
     parser.add_argument("message", nargs="*", help="Message text. If omitted, stdin is used.")
     args = parser.parse_args()
 
@@ -130,8 +296,15 @@ def main() -> int:
     if not message:
         message = "Quant Researcher Desk notification"
     message = redact(message, env)
+    parse_mode = args.parse_mode or ("HTML" if message.startswith("<b>") else "")
 
     if args.dry_run or not args.post:
+        if args.photo:
+            print(f"telegram dry-run photo: {args.photo} caption: {message}")
+            return 0
+        if args.document:
+            print(f"telegram dry-run document: {args.document} caption: {message}")
+            return 0
         print(f"telegram dry-run: {message}")
         return 0
 
@@ -145,7 +318,12 @@ def main() -> int:
         return 1
 
     try:
-        post_telegram(token, chat_id, message, args.parse_mode)
+        if args.photo:
+            post_telegram_photo(token, chat_id, args.photo, message, parse_mode)
+        elif args.document:
+            post_telegram_document(token, chat_id, args.document, message, parse_mode)
+        else:
+            post_telegram(token, chat_id, message, parse_mode)
     except TelegramSendError as exc:
         print(f"telegram notification failed: {exc}", file=sys.stderr)
         return 1

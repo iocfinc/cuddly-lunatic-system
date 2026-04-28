@@ -23,6 +23,7 @@ data/
 reports/
 journal/
 snapshots/
+.com.moomoo.OpenD/
 
 # Local agentic-stack runtime state
 .agent/
