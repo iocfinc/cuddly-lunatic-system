@@ -1,0 +1,8 @@
+# Quant Researcher Desk headless schedules.
+# Cron uses the Mac user's local timezone.
+
+# Rotating HK/US sector value-chain brief, daily 08:00.
+0 8 * * * /Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/scripts/cron_sector_update.sh
+
+# Catalyst options screen, daily 10:00.
+0 10 * * * /Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/scripts/cron_options_update.sh

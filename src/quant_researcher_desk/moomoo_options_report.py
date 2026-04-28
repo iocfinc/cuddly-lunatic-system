@@ -132,6 +132,35 @@ def nearest_expiry(expiries: Iterable[str], today: dt.date | None = None) -> str
     return min(parsed, key=lambda item: item[0])[1]
 
 
+def target_expiry(
+    expiries: Iterable[str],
+    today: dt.date | None = None,
+    *,
+    minimum_days_out: int = 0,
+    target_days_out: int | None = None,
+) -> str:
+    """Select an expiry far enough out, closest to the target holding window."""
+
+    today = today or dt.date.today()
+    target = today + dt.timedelta(days=target_days_out if target_days_out is not None else minimum_days_out)
+    parsed: list[tuple[dt.date, str]] = []
+    for expiry in expiries:
+        text = str(expiry).strip()
+        if not text:
+            continue
+        try:
+            date_value = dt.date.fromisoformat(text[:10])
+        except ValueError:
+            continue
+        if (date_value - today).days >= minimum_days_out:
+            parsed.append((date_value, text[:10]))
+    if not parsed:
+        raise OptionsReportError(
+            f"No option expirations at least {minimum_days_out} days out were returned by OpenD."
+        )
+    return min(parsed, key=lambda item: (abs((item[0] - target).days), item[0]))[1]
+
+
 def merge_chain_and_snapshots(
     chain_rows: list[dict[str, Any]],
     snapshot_rows: list[dict[str, Any]],
@@ -196,10 +225,18 @@ def build_options_report(
     expiry: str | None = None,
     rows: int = 5,
     now: dt.datetime | None = None,
+    minimum_days_out: int = 0,
+    target_days_out: int | None = None,
 ) -> OptionsReport:
     underlying = client.get_underlying_snapshot(symbol)
     underlying_price = as_float(get_first(underlying, "last_price", "cur_price", "price", default=None))
-    selected_expiry = expiry or nearest_expiry(client.get_option_expirations(symbol), today=(now or dt.datetime.now()).date())
+    today = (now or dt.datetime.now()).date()
+    selected_expiry = expiry or target_expiry(
+        client.get_option_expirations(symbol),
+        today=today,
+        minimum_days_out=minimum_days_out,
+        target_days_out=target_days_out,
+    )
     chain_rows = client.get_option_chain(symbol, selected_expiry)
     if not chain_rows:
         raise OptionsReportError(f"No option chain rows returned for {symbol} {selected_expiry}.")

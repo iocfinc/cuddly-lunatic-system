@@ -26,16 +26,17 @@ Implemented now:
 - Python scaffold with `uv`
 - local preflight checks and Git hooks
 - Telegram notification script with formatted HTML support
+- Telegram document attachment support for report delivery
 - local Moomoo OpenD quote integration
 - `US.TSM` options report script with ranked calls and puts
+- fixture-backed options pricing, Greeks, IV, scenario, and verdict pipeline
+- fixture-backed US/HK sector value-chain tree reports
+- institutional HTML report rendering with optional PDF export through Playwright
 - unit tests for report formatting, ranking logic, and Telegram payloads
 
 Planned next:
 
-- broader options ingestion workflows
-- pricing engine with Black-Scholes and Greeks
-- implied volatility and historical volatility analysis
-- scenario matrices and strategy evaluation
+- real earnings, fundamentals, and sector relationship providers
 - journal persistence and outcome tracking
 - richer thesis and report generation
 
@@ -174,6 +175,45 @@ The report includes:
 - ranked top puts
 - risk note stating the output is research only
 
+## Options Research PDF/HTML Report
+
+The fuller options research flow prices a selected contract, computes Greeks, compares IV against HV, simulates price/IV/time-decay scenarios, and produces a risk-first verdict. Use fixture mode for deterministic dry-runs:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --dry-run --fixture --symbol US.TEST --report-format html
+```
+
+Use live Moomoo OpenD data by omitting `--fixture` after OpenD is running:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --post --symbol US.TSM --option-type CALL --strike 100
+```
+
+The script attempts PDF output by default. If Playwright/Chromium is unavailable, it writes the printable HTML companion and uses that as the attachment path.
+
+## Sector Tree Newsletter Report
+
+The sector tree flow builds an educational upstream/midstream/downstream company map for a sector and produces Telegram TLDR copy plus a detailed PDF attachment. The scheduled job rotates across fixture-backed HK and US sectors including HK tech, US semiconductors, US energy, US banks, HK consumer, US defense, and HK internet platforms:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_sector_tree_report.py --dry-run --rotate --report-format pdf
+```
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_sector_tree_report.py --dry-run --market HK --sector "internet platforms" --report-format pdf
+```
+
+The headless cron wrappers support `QRD_DRY_RUN=true` for local validation without sending Telegram messages:
+
+```sh
+QRD_DRY_RUN=true scripts/cron_sector_update.sh
+QRD_DRY_RUN=true scripts/cron_options_update.sh
+```
+
+The scheduled options screen is proactive by design: it targets expiries around one week out and skips same-day expiry setups, because those are usually reaction trades rather than researchable thesis windows.
+
+Reports are written under `reports/` by default. Treat generated report files as local output unless a specific artifact is intentionally promoted into tracked documentation.
+
 ## Product Principles
 
 - structure over impulse
@@ -186,4 +226,3 @@ The guiding principle comes directly from the PRD: we are not predicting markets
 ## Keywords
 
 Quant Researcher Desk, quantitative research system, options research, options chain analysis, implied volatility, Greeks, Black-Scholes, scenario analysis, Moomoo OpenD, moomoo-api, Telegram bot, Telegram market report, agentic finance workflow, retail investor research tooling, options thesis generator.
-
