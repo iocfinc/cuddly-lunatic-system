@@ -48,6 +48,9 @@ Optional env/config seams:
 - `TRADINGAGENTS_ENABLED`
 - `TRADINGAGENTS_REF`
 - `TRADINGAGENTS_LLM_PROVIDER`
+- `TRADINGAGENTS_LLM_BACKEND`
+- `TRADINGAGENTS_CODEX_MODEL`
+- `TRADINGAGENTS_CODEX_PROFILE`
 - `TRADINGAGENTS_RESULTS_DIR`
 - `TRADINGAGENTS_CACHE_DIR`
 - `TRADINGAGENTS_MEMORY_DIR`
@@ -71,6 +74,11 @@ uv --cache-dir .uv-cache run python scripts/send_tradingagents_packet.py --dry-r
 ```
 
 If the optional live adapter is enabled and installed locally, the same script can run without `--fixture`. When the dependency or provider credentials are missing, it should fail with exact actionable messaging and leave the existing options or sector flows untouched.
+
+The debate step now supports two backend modes behind a repo-local decorator seam:
+
+- `api`: use the upstream TradingAgents graph and its configured LLM provider
+- `codex`: use headless `codex exec` with a JSON schema contract, defaulting to `gpt-5.4`
 
 ## Non-Goal
 

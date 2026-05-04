@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import dataclasses
 import datetime as dt
+import functools
 import html
 import json
 import os
 import pathlib
+import pwd
 import re
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Any
 
@@ -59,6 +63,9 @@ class TradingAgentsConfig:
     cache_dir: pathlib.Path
     memory_dir: pathlib.Path
     allow_execution: bool
+    llm_backend: str
+    codex_model: str
+    codex_profile: str | None
 
 
 @dataclass(frozen=True)
@@ -98,6 +105,10 @@ def _repo_local_dir(root: pathlib.Path, *parts: str) -> pathlib.Path:
     return root.joinpath(*parts)
 
 
+def _real_user_home() -> pathlib.Path:
+    return pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
 def load_tradingagents_config(
     root: pathlib.Path,
     env: dict[str, str] | None = None,
@@ -115,6 +126,9 @@ def load_tradingagents_config(
         cache_dir=pathlib.Path(env_values.get("TRADINGAGENTS_CACHE_DIR", _repo_local_dir(root, "data", "tradingagents", "cache"))),
         memory_dir=pathlib.Path(env_values.get("TRADINGAGENTS_MEMORY_DIR", _repo_local_dir(root, "data", "tradingagents", "memory"))),
         allow_execution=_env_flag(env_values.get("TRADINGAGENTS_ALLOW_EXECUTION"), default=False),
+        llm_backend=env_values.get("TRADINGAGENTS_LLM_BACKEND", "api").strip().lower() or "api",
+        codex_model=env_values.get("TRADINGAGENTS_CODEX_MODEL", "gpt-5.4"),
+        codex_profile=(env_values.get("TRADINGAGENTS_CODEX_PROFILE") or "").strip() or None,
     )
 
 
@@ -250,23 +264,144 @@ def _fixture_debate(evidence_pack: DeskEvidencePack) -> AgentDebateResult:
     )
 
 
-def run_tradingagents_debate(
+def _codex_output_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "analyst_brief",
+            "bullish_research",
+            "bearish_research",
+            "risk_assessment",
+            "consensus_summary",
+            "raw_decision",
+            "warnings",
+        ],
+        "properties": {
+            "analyst_brief": {"type": "string"},
+            "bullish_research": {"type": "string"},
+            "bearish_research": {"type": "string"},
+            "risk_assessment": {"type": "string"},
+            "consensus_summary": {"type": "string"},
+            "raw_decision": {"type": "string"},
+            "warnings": {"type": "array", "items": {"type": "string"}},
+        },
+    }
+
+
+def _codex_prompt(packet_request: TradingAgentsPacketRequest, evidence_pack: DeskEvidencePack) -> str:
+    report = evidence_pack.research_report
+    prompt_payload = {
+        "symbol": packet_request.symbol,
+        "analysis_date": packet_request.analysis_date or evidence_pack.generated_at.date().isoformat(),
+        "evidence_pack": dataclasses.asdict(evidence_pack),
+        "instructions": [
+            "You are producing a bounded research debate for Quant Researcher Desk.",
+            "Use research-only language. Do not use BUY, SELL, EXECUTE, order submission, or broker-style phrasing.",
+            "Return JSON matching the provided schema.",
+            "raw_decision should be a short lowercase research outcome such as watch, reject, candidate, or review.",
+        ],
+        "style": "Professional desk note. State evidence, interpretation, and risk.",
+        "non_goals": [
+            "No broker connectivity",
+            "No trade execution",
+            "No portfolio instructions",
+        ],
+        "reference_metrics": {
+            "selected_contract": report.contract.code,
+            "underlying_price": report.underlying_price,
+            "market_price": report.contract.market_price,
+            "iv": report.implied_volatility_used,
+            "hv": report.historical_volatility,
+            "verdict": report.verdict,
+        },
+    }
+    return json.dumps(prompt_payload, indent=2, default=_json_default)
+
+
+def _codex_backend_debate(
     config: TradingAgentsConfig,
     packet_request: TradingAgentsPacketRequest,
     evidence_pack: DeskEvidencePack,
-    fixture: bool = False,
 ) -> AgentDebateResult:
-    if fixture:
-        return _fixture_debate(evidence_pack)
-    if not config.enabled:
-        raise TradingAgentsIntegrationError(
-            "TradingAgents is disabled. Set TRADINGAGENTS_ENABLED=true to enable the optional adapter."
-        )
-    if config.allow_execution:
-        raise TradingAgentsIntegrationError(
-            "TRADINGAGENTS_ALLOW_EXECUTION must remain false in naval-analyst. This integration is research-only."
-        )
+    config.results_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="tradingagents-codex-", dir=str(config.results_dir)) as tmp_dir:
+        tmp_path = pathlib.Path(tmp_dir)
+        schema_path = tmp_path / "schema.json"
+        output_path = tmp_path / "last-message.json"
+        schema_path.write_text(json.dumps(_codex_output_schema(), indent=2), encoding="utf-8")
 
+        cmd = [
+            "codex",
+            "exec",
+            "-m",
+            config.codex_model,
+            "-C",
+            str(pathlib.Path(__file__).resolve().parents[2]),
+            "--sandbox",
+            "read-only",
+            "--output-schema",
+            str(schema_path),
+            "-o",
+            str(output_path),
+            "-",
+        ]
+        if config.codex_profile:
+            cmd[2:2] = ["-p", config.codex_profile]
+
+        env = dict(os.environ)
+        env["TRADINGAGENTS_CACHE_DIR"] = str(config.cache_dir)
+        env["TRADINGAGENTS_MEMORY_DIR"] = str(config.memory_dir)
+        env["TRADINGAGENTS_MEMORY_LOG_PATH"] = str(config.memory_dir / "trading_memory.md")
+        env["CODEX_HOME"] = env.get("CODEX_HOME", str(_real_user_home() / ".codex"))
+
+        try:
+            subprocess.run(
+                cmd,
+                input=_codex_prompt(packet_request, evidence_pack),
+                text=True,
+                capture_output=True,
+                check=True,
+                cwd=str(pathlib.Path(__file__).resolve().parents[2]),
+                env=env,
+            )
+        except FileNotFoundError as exc:
+            raise TradingAgentsIntegrationError("codex exec is not available on PATH.") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or "").strip()
+            stdout = (exc.stdout or "").strip()
+            detail = stderr or stdout or str(exc)
+            raise TradingAgentsIntegrationError(f"codex exec failed: {detail}") from exc
+
+        if not output_path.exists():
+            raise TradingAgentsIntegrationError("codex exec did not write the expected JSON output file.")
+
+        try:
+            payload = json.loads(output_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise TradingAgentsIntegrationError("codex exec returned non-JSON output despite the schema contract.") from exc
+
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = [str(warnings)] if warnings else []
+
+    return AgentDebateResult(
+        analyst_brief=_sanitize_research_text(str(payload.get("analyst_brief", ""))),
+        bullish_research=_sanitize_research_text(str(payload.get("bullish_research", ""))),
+        bearish_research=_sanitize_research_text(str(payload.get("bearish_research", ""))),
+        risk_assessment=_sanitize_research_text(str(payload.get("risk_assessment", ""))),
+        consensus_summary=_sanitize_research_text(str(payload.get("consensus_summary", ""))),
+        raw_decision=str(payload.get("raw_decision", "")),
+        warnings=[_sanitize_research_text(str(item)) for item in warnings],
+        provenance={"mode": "live", "provider": "codex", "model": config.codex_model},
+    )
+
+
+def _api_backend_debate(
+    config: TradingAgentsConfig,
+    packet_request: TradingAgentsPacketRequest,
+    evidence_pack: DeskEvidencePack,
+) -> AgentDebateResult:
     required_key = _required_llm_env_key(config.llm_provider)
     if required_key and not os.environ.get(required_key):
         raise TradingAgentsIntegrationError(
@@ -313,6 +448,48 @@ def run_tradingagents_debate(
         warnings=["Review the stored raw decision payload before sharing externally."],
         provenance={"mode": "live", "provider": "TradingAgents", "ref": config.ref},
     )
+
+
+def _llm_backend_dispatcher(fn):  # type: ignore[no-untyped-def]
+    @functools.wraps(fn)
+    def wrapper(
+        config: TradingAgentsConfig,
+        packet_request: TradingAgentsPacketRequest,
+        evidence_pack: DeskEvidencePack,
+    ) -> AgentDebateResult:
+        if config.llm_backend == "codex":
+            return _codex_backend_debate(config, packet_request, evidence_pack)
+        return fn(config, packet_request, evidence_pack)
+
+    return wrapper
+
+
+@_llm_backend_dispatcher
+def _run_live_tradingagents_debate(
+    config: TradingAgentsConfig,
+    packet_request: TradingAgentsPacketRequest,
+    evidence_pack: DeskEvidencePack,
+) -> AgentDebateResult:
+    return _api_backend_debate(config, packet_request, evidence_pack)
+
+
+def run_tradingagents_debate(
+    config: TradingAgentsConfig,
+    packet_request: TradingAgentsPacketRequest,
+    evidence_pack: DeskEvidencePack,
+    fixture: bool = False,
+) -> AgentDebateResult:
+    if fixture:
+        return _fixture_debate(evidence_pack)
+    if not config.enabled:
+        raise TradingAgentsIntegrationError(
+            "TradingAgents is disabled. Set TRADINGAGENTS_ENABLED=true to enable the optional adapter."
+        )
+    if config.allow_execution:
+        raise TradingAgentsIntegrationError(
+            "TRADINGAGENTS_ALLOW_EXECUTION must remain false in naval-analyst. This integration is research-only."
+        )
+    return _run_live_tradingagents_debate(config, packet_request, evidence_pack)
 
 
 def build_decision_packet(
