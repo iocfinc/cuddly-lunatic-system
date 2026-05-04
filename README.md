@@ -73,6 +73,7 @@ Tracked planning docs live in [internal-notes/PRD.md](/Users/iraoliverfernando/D
 - `src/` contains product code
 - `tests/` contains unit tests
 - `scripts/` contains local operational scripts
+- `docs/` contains tracked visual and documentation artifacts
 - `internal-notes/` contains PRD, QA criteria, and design guidance
 
 Current implementation highlights:
@@ -80,6 +81,18 @@ Current implementation highlights:
 - [scripts/send_tsmc_options_report.py](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/scripts/send_tsmc_options_report.py)
 - [src/quant_researcher_desk/moomoo_options_report.py](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/src/quant_researcher_desk/moomoo_options_report.py)
 - [scripts/telegram_notify.py](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/scripts/telegram_notify.py)
+
+## Motion Overview
+
+The current product-motion overview artifact is a Remotion explainer for the sector and industry research workflow:
+
+<p align="center">
+  <img src="docs/assets/sector-universe-explainer.gif" alt="sector-universe-explainer" width="880"/>
+</p>
+
+This GIF is derived from [demos/remotion/sector-universe-explainer](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/demos/remotion/sector-universe-explainer) and shows how Quant Researcher Desk maps market sectors into upstream, operating, demand, and evidence layers before turning the research into Telegram and PDF-ready outputs. A companion MP4 is tracked at [docs/assets/sector-universe-explainer.mp4](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/docs/assets/sector-universe-explainer.mp4).
+
+The earlier Options Analyst workflow overview remains available at [docs/assets/options-analyst-overview.gif](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/docs/assets/options-analyst-overview.gif).
 
 ## Local Setup
 
@@ -191,9 +204,60 @@ uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --po
 
 The script attempts PDF output by default. If Playwright/Chromium is unavailable, it writes the printable HTML companion and uses that as the attachment path.
 
-## Sector Tree Newsletter Report
+## TradingAgents Research Decision Packet
 
-The sector tree flow builds an educational upstream/midstream/downstream company map for a sector and produces Telegram TLDR copy plus a detailed PDF attachment. The scheduled job rotates across fixture-backed HK and US sectors including HK tech, US semiconductors, US energy, US banks, HK consumer, US defense, and HK internet platforms:
+The repository now includes an optional TradingAgents adoption seam that treats TradingAgents as a bounded research-debate engine. It is disabled by default, reuses the existing report renderer and Telegram document sender, and keeps all state under repo-local ignored paths instead of `~/.tradingagents`.
+
+Use the fixture path for deterministic local validation with no OpenD, no Telegram post, and no live LLM requirement:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_tradingagents_packet.py --dry-run --fixture --symbol US.TEST --report-format pdf
+```
+
+The script writes:
+
+- a rendered packet attachment under `reports/tradingagents/` by default
+- a repo-local JSON artifact under `data/tradingagents/results/`
+
+Optional env vars:
+
+```sh
+TRADINGAGENTS_ENABLED=false
+TRADINGAGENTS_REF=refs/tags/v0.2.4
+TRADINGAGENTS_LLM_PROVIDER=openai
+TRADINGAGENTS_LLM_BACKEND=api
+TRADINGAGENTS_CODEX_MODEL=gpt-5.4
+TRADINGAGENTS_CODEX_PROFILE=
+TRADINGAGENTS_RESULTS_DIR=data/tradingagents/results
+TRADINGAGENTS_CACHE_DIR=data/tradingagents/cache
+TRADINGAGENTS_MEMORY_DIR=data/tradingagents/memory
+TRADINGAGENTS_ALLOW_EXECUTION=false
+```
+
+Backend options:
+
+- `TRADINGAGENTS_LLM_BACKEND=api` uses the upstream TradingAgents graph and its provider SDK path
+- `TRADINGAGENTS_LLM_BACKEND=codex` uses a headless `codex exec` JSON contract, defaulting to `gpt-5.4`
+
+When `TRADINGAGENTS_ENABLED=true` and the upstream dependency is installed locally, the script can attempt a live adapter run. The output is still normalized into research-only labels: `Research Candidate`, `Watchlist`, `Reject`, or `Needs Human Review`.
+
+## Sector Universe and Newsletter Report
+
+The sector tree flow builds an educational upstream/midstream/downstream map for a sector and produces Telegram TLDR copy plus a detailed PDF attachment. The scheduled job now prefers the exported Moomoo HK/US industry universe for rotation, with the older curated fixture-backed sectors used as a fallback. It also persists the last successful 3-hour dispatch so duplicate cron or LaunchAgent runs do not resend the same sector inside the cooldown window.
+
+Refresh the local sector universe from Moomoo OpenD:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/export_moomoo_sector_universe.py
+```
+
+The export writes:
+
+- `docs/sector-industry-universe.md` for the working research document
+- `docs/sector-universe-app.html` for an interactive visual browser
+- `data/sector-universe/moomoo_hk_us_plates.json` and `.csv` for the raw Moomoo plate database
+- `data/sector-universe/value_chain_nodes.csv` for graph nodes
+- `data/sector-universe/value_chain_edges.csv` and `value_chain_graph.mmd` for starter supply-chain relationships
 
 ```sh
 uv --cache-dir .uv-cache run python scripts/send_sector_tree_report.py --dry-run --rotate --report-format pdf
@@ -209,6 +273,21 @@ The headless cron wrappers support `QRD_DRY_RUN=true` for local validation witho
 QRD_DRY_RUN=true scripts/cron_sector_update.sh
 QRD_DRY_RUN=true scripts/cron_options_update.sh
 ```
+
+## macOS Scheduling
+
+For macOS, prefer `launchd` over `cron`. This repository lives under `~/Desktop/...`, and background cron execution is less reliable there because of macOS privacy and session behavior.
+
+Install the user LaunchAgents:
+
+```sh
+./scripts/install-launch-agents.sh
+```
+
+The repo includes:
+
+- `launchd/com.dioscuri.quant-researcher-desk.sector-update.plist` for sector updates every 3 hours
+- `launchd/com.dioscuri.quant-researcher-desk.options-update.plist` for the daily 10:00 options update
 
 The scheduled options screen is proactive by design: it targets expiries around one week out and skips same-day expiry setups, because those are usually reaction trades rather than researchable thesis windows.
 
