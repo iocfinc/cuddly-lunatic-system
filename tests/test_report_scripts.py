@@ -58,7 +58,7 @@ def test_sector_tree_script_fixture_dry_run_writes_attachment(tmp_path: pathlib.
     assert "attachment:" in result.stdout
     files = list(tmp_path.glob("*.html"))
     assert files
-    assert files[0].name == "hk-internet-platforms-sector-tree.html"
+    assert files[0].name == "hk-internet-platforms-sector-map.html"
 
 
 def test_sector_tree_script_rotation_selects_supported_sector(tmp_path: pathlib.Path) -> None:
@@ -76,3 +76,42 @@ def test_sector_tree_script_rotation_selects_supported_sector(tmp_path: pathlib.
     assert "sector rotation selected:" in result.stdout
     assert "attachment:" in result.stdout
     assert list(tmp_path.glob("*.html"))
+
+
+def test_tradingagents_packet_script_fixture_dry_run_writes_attachment_and_json(tmp_path: pathlib.Path) -> None:
+    result = run_script(
+        "scripts/send_tradingagents_packet.py",
+        "--dry-run",
+        "--fixture",
+        "--symbol",
+        "US.TEST",
+        "--report-format",
+        "html",
+        "--output-dir",
+        str(tmp_path),
+        "--results-dir",
+        str(tmp_path / "results"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "US.TEST Decision Packet" in result.stdout
+    assert "attachment:" in result.stdout
+    assert "artifact:" in result.stdout
+    assert list(tmp_path.glob("*.html"))
+    assert list((tmp_path / "results").glob("*.json"))
+
+
+def test_tradingagents_packet_script_live_path_fails_gracefully_when_disabled(tmp_path: pathlib.Path) -> None:
+    result = run_script(
+        "scripts/send_tradingagents_packet.py",
+        "--dry-run",
+        "--symbol",
+        "US.TEST",
+        "--report-format",
+        "html",
+        "--output-dir",
+        str(tmp_path),
+    )
+
+    assert result.returncode == 1
+    assert "TRADINGAGENTS_ENABLED=true" in result.stderr
