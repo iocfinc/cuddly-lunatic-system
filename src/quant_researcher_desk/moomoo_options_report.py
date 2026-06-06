@@ -32,6 +32,15 @@ class QuoteClient(Protocol):
     def get_market_snapshots(self, codes: list[str]) -> list[dict[str, Any]]:
         ...
 
+    def get_plate_list(self, market: str, plate_type: str = "ALL") -> list[dict[str, Any]]:
+        ...
+
+    def get_plate_constituents(self, plate_code: str) -> list[dict[str, Any]]:
+        ...
+
+    def get_daily_bars(self, symbol: str, count: int = 250) -> list[dict[str, Any]]:
+        ...
+
     def close(self) -> None:
         ...
 
@@ -58,6 +67,143 @@ class OptionsReport:
     scanned_contract_count: int
     calls: list[RankedOption]
     puts: list[RankedOption]
+
+
+@dataclass(frozen=True)
+class OpenDCapability:
+    name: str
+    method_name: str
+    status: str
+    workflow_stage: str
+    ranking_eligible: bool
+    notes: str
+
+
+def opend_capability_contract() -> tuple[OpenDCapability, ...]:
+    """Verified OpenD wrapper surface for this repo's current production lane."""
+
+    return (
+        OpenDCapability(
+            name="plate_list",
+            method_name="get_plate_list",
+            status="verified",
+            workflow_stage="universe_discovery",
+            ranking_eligible=False,
+            notes="Broad market and sector plate discovery for seeding weekly underlyings.",
+        ),
+        OpenDCapability(
+            name="plate_constituents",
+            method_name="get_plate_constituents",
+            status="verified",
+            workflow_stage="universe_discovery",
+            ranking_eligible=False,
+            notes="Underlying membership expansion from selected plates.",
+        ),
+        OpenDCapability(
+            name="daily_bars",
+            method_name="get_daily_bars",
+            status="verified",
+            workflow_stage="stock_context",
+            ranking_eligible=False,
+            notes="Daily price history for trend-regime classification.",
+        ),
+        OpenDCapability(
+            name="option_expirations",
+            method_name="get_option_expirations",
+            status="verified",
+            workflow_stage="weekly_expiry",
+            ranking_eligible=False,
+            notes="Weekly holding-window expiry selection.",
+        ),
+        OpenDCapability(
+            name="option_chain",
+            method_name="get_option_chain",
+            status="verified",
+            workflow_stage="contract_quality",
+            ranking_eligible=False,
+            notes="Contract discovery for the selected expiry window.",
+        ),
+        OpenDCapability(
+            name="market_snapshots",
+            method_name="get_market_snapshots",
+            status="verified",
+            workflow_stage="contract_quality",
+            ranking_eligible=False,
+            notes="Batch snapshot transport for underlying and contract records.",
+        ),
+        OpenDCapability(
+            name="underlying_snapshot",
+            method_name="get_underlying_snapshot",
+            status="verified",
+            workflow_stage="contract_quality",
+            ranking_eligible=False,
+            notes="Underlying price used for contract selection and pricing inputs.",
+        ),
+        OpenDCapability(
+            name="implied_volatility",
+            method_name="get_market_snapshots",
+            status="verified_when_present",
+            workflow_stage="valuation",
+            ranking_eligible=True,
+            notes="Use only when the snapshot row includes an IV field; otherwise fall back to solver-derived IV.",
+        ),
+        OpenDCapability(
+            name="delta",
+            method_name="get_market_snapshots",
+            status="verified_when_present",
+            workflow_stage="ranking",
+            ranking_eligible=True,
+            notes="Use only when the snapshot row includes delta; current weekly lane uses it for delta-band filtering.",
+        ),
+        OpenDCapability(
+            name="open_interest",
+            method_name="get_market_snapshots",
+            status="verified_when_present",
+            workflow_stage="ranking",
+            ranking_eligible=True,
+            notes="Use only when the snapshot row includes open interest.",
+        ),
+        OpenDCapability(
+            name="volume",
+            method_name="get_market_snapshots",
+            status="verified_when_present",
+            workflow_stage="ranking",
+            ranking_eligible=True,
+            notes="Use only when the snapshot row includes contract volume.",
+        ),
+        OpenDCapability(
+            name="watchlist_groups",
+            method_name="get_user_security_groups",
+            status="verified",
+            workflow_stage="universe_discovery",
+            ranking_eligible=False,
+            notes="Repo-owned watchlist workflows can source universes from saved groups.",
+        ),
+        OpenDCapability(
+            name="watchlist_securities",
+            method_name="get_user_security",
+            status="verified",
+            workflow_stage="universe_discovery",
+            ranking_eligible=False,
+            notes="Repo-owned watchlist workflows can source names from saved groups.",
+        ),
+        OpenDCapability(
+            name="bid_ask_spread",
+            method_name="get_market_snapshots",
+            status="unsupported_for_scoring",
+            workflow_stage="ranking",
+            ranking_eligible=False,
+            notes="Do not score real spread width until the wrapper exposes and tests reliable bid/ask fields.",
+        ),
+        OpenDCapability(
+            name="event_calendar",
+            method_name="n/a",
+            status="unsupported_for_scoring",
+            workflow_stage="event_context",
+            ranking_eligible=False,
+            notes="Weekly lane must treat event timing as provider-optional until a repo-owned event seam is wired in.",
+        ),
+    )
 
 
 def normalize_records(data: Any) -> list[dict[str, Any]]:
@@ -367,6 +513,59 @@ class MoomooOpenDQuoteClient:
             ret, data = self.ctx.get_market_snapshot(batch)
             records.extend(normalize_records(self.check_ret(ret, data, "get market snapshots")))
         return records
+
+    def _resolve_market_enum(self, market: str) -> Any:
+        normalized = market.strip().upper()
+        try:
+            from moomoo import Market
+        except Exception:
+            return normalized
+        if not hasattr(Market, normalized):
+            raise OptionsReportError(f"Unsupported market for plate discovery: {market}")
+        return getattr(Market, normalized)
+
+    def _resolve_plate_enum(self, plate_type: str) -> Any:
+        normalized = plate_type.strip().upper()
+        try:
+            from moomoo import Plate
+        except Exception:
+            return normalized
+        if not hasattr(Plate, normalized):
+            raise OptionsReportError(f"Unsupported plate type for plate discovery: {plate_type}")
+        return getattr(Plate, normalized)
+
+    def get_plate_list(self, market: str, plate_type: str = "ALL") -> list[dict[str, Any]]:
+        ret, data = self.ctx.get_plate_list(self._resolve_market_enum(market), self._resolve_plate_enum(plate_type))
+        return normalize_records(self.check_ret(ret, data, f"get {market} plate list"))
+
+    def get_plate_constituents(self, plate_code: str) -> list[dict[str, Any]]:
+        ret, data = self.ctx.get_plate_stock(plate_code)
+        return normalize_records(self.check_ret(ret, data, f"get plate constituents for {plate_code}"))
+
+    def _resolve_kline_enum(self) -> Any:
+        try:
+            from moomoo import KLType
+        except Exception:
+            return "K_DAY"
+        return getattr(KLType, "K_DAY", "K_DAY")
+
+    def get_daily_bars(self, symbol: str, count: int = 250) -> list[dict[str, Any]]:
+        kline_type = self._resolve_kline_enum()
+        if hasattr(self.ctx, "request_history_kline"):
+            ret, data, _ = self.ctx.request_history_kline(symbol, ktype=kline_type, max_count=count)
+            return normalize_records(self.check_ret(ret, data, f"get daily bars for {symbol}"))
+        if hasattr(self.ctx, "get_cur_kline"):
+            ret, data = self.ctx.get_cur_kline(symbol, count, ktype=kline_type)
+            return normalize_records(self.check_ret(ret, data, f"get daily bars for {symbol}"))
+        raise OptionsReportError("OpenD quote client does not expose a daily-bar API in this environment.")
+
+    def get_user_security_groups(self, group_type: str = "ALL") -> list[dict[str, Any]]:
+        ret, data = self.ctx.get_user_security_group(group_type)
+        return normalize_records(self.check_ret(ret, data, "get watchlist groups"))
+
+    def get_user_security(self, group_name: str) -> list[dict[str, Any]]:
+        ret, data = self.ctx.get_user_security(group_name)
+        return normalize_records(self.check_ret(ret, data, f"get watchlist securities for {group_name}"))
 
     def close(self) -> None:
         if self._ctx is not None:

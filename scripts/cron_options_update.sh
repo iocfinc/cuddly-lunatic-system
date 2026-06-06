@@ -8,6 +8,7 @@ UV="/opt/homebrew/bin/uv"
 LOG_DIR="$ROOT/reports/cron-logs"
 LOCK_ROOT="$ROOT/.cron-locks"
 LOCK_DIR="$LOCK_ROOT/options-update.lock"
+LOCK_STALE_SECONDS="${QRD_LOCK_STALE_SECONDS:-21600}"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 export PYTHONUNBUFFERED=1
@@ -23,7 +24,24 @@ exec >> "$LOG_DIR/options-update.log" 2>&1
 echo "==== $(date '+%Y-%m-%d %H:%M:%S %Z') options-update start ===="
 echo "mode=$send_mode"
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+acquire_lock() {
+  if mkdir "$LOCK_DIR" 2>/dev/null; then
+    return 0
+  fi
+  if [[ -d "$LOCK_DIR" ]]; then
+    lock_epoch=$(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    age=$((now_epoch - lock_epoch))
+    if (( age > LOCK_STALE_SECONDS )); then
+      echo "options-update stale lock detected: age=${age}s; clearing $LOCK_DIR"
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+      mkdir "$LOCK_DIR" 2>/dev/null && return 0
+    fi
+  fi
+  return 1
+}
+
+if ! acquire_lock; then
   echo "options-update skipped: previous run still active"
   exit 0
 fi

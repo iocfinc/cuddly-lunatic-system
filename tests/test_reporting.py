@@ -33,6 +33,17 @@ def sample_sections() -> list[dict[str, object]]:
                 "rows": [["Semis", "Vol bid", "Gap risk"], ["Energy", "Range", "Macro headline"]],
             },
         },
+        {
+            "title": "Relationship Map",
+            "relationship_map": {
+                "columns": [
+                    {"label": "Upstream", "items": [{"symbol": "ASML", "name": "ASML Holding", "industry": "Equipment"}]},
+                    {"label": "Midstream", "items": [{"symbol": "TSM", "name": "Taiwan Semiconductor", "industry": "Foundry"}]},
+                    {"label": "Downstream", "items": [{"symbol": "NVDA", "name": "NVIDIA", "industry": "Accelerated computing"}]},
+                ],
+                "edges": [{"source": "ASML", "target": "TSM", "relationship": "enables manufacturing"}],
+            },
+        },
     ]
 
 
@@ -49,6 +60,9 @@ def test_render_report_html_escapes_text_and_renders_institutional_template() ->
     assert "Research &amp; Risk" in html
     assert "metadata-grid" in html
     assert "report-section" in html
+    assert "size: A4" in html
+    assert "relationship-map" in html
+    assert "ASML -> TSM" in html
     assert "<th>Sector</th>" in html
     assert "Semis" in html
 
@@ -64,6 +78,41 @@ def test_render_report_html_supports_infographic_bar_charts() -> None:
     assert "chart-bar negative" in html
     assert "chart-bar positive" in html
     assert "-5%" in html
+
+
+def test_render_report_html_supports_line_charts_and_multi_series() -> None:
+    html = render_report_html(
+        "Pricing Curves",
+        [
+            {
+                "title": "Black-Scholes Value Curve",
+                "chart": {
+                    "type": "line",
+                    "rows": [
+                        {"label": "380", "value": 2.1},
+                        {"label": "390", "value": 4.3},
+                        {"label": "400", "value": 7.2},
+                    ],
+                },
+            },
+            {
+                "title": "Monte Carlo Sample Paths",
+                "chart": {
+                    "type": "line",
+                    "series": [
+                        {"label": "Path 1", "rows": [{"label": "0d", "value": 395.0}, {"label": "7d", "value": 389.5}]},
+                        {"label": "Path 2", "rows": [{"label": "0d", "value": 395.0}, {"label": "7d", "value": 401.2}]},
+                    ],
+                },
+            },
+        ],
+        {"symbol": "US.TEST"},
+    )
+
+    assert "line-chart" in html
+    assert "line-chart-svg" in html
+    assert "series-label" in html
+    assert "Path 1" in html
 
 
 def test_write_html_report_creates_parent_directory(tmp_path: pathlib.Path) -> None:
@@ -103,7 +152,9 @@ def test_write_native_pdf_report_creates_pdf_file(tmp_path: pathlib.Path) -> Non
     rendered = write_native_pdf_report("Native Desk", sample_sections(), {"symbol": "US.TSM"}, pdf_path)
 
     assert rendered == pdf_path
-    assert pdf_path.read_bytes().startswith(b"%PDF-1.4")
+    pdf_bytes = pdf_path.read_bytes()
+    assert pdf_bytes.startswith(b"%PDF-1.4")
+    assert b"/MediaBox [0 0 595 842]" in pdf_bytes
 
 
 def test_render_image_report_does_not_launch_system_chrome_when_playwright_is_unavailable(

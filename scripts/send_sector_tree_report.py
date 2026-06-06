@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import html
 import pathlib
 import re
@@ -16,13 +17,27 @@ sys.path.insert(0, str(ROOT))
 
 from quant_researcher_desk.reporting import ReportRenderError, render_image_report, render_pdf_report, write_html_report  # noqa: E402
 from quant_researcher_desk.sector_tree import (  # noqa: E402
+    FixtureSectorTreeProvider,
+    IndustryUniverseSectorTreeProvider,
     SectorTreeError,
     SectorTreeReport,
     SectorTreeRequest,
     build_sector_tree_report,
 )
-from quant_researcher_desk.sector_rotation import select_sector_rotation_entry  # noqa: E402
+from quant_researcher_desk.industry_universe import load_industry_nodes_csv, priority_rotation_nodes  # noqa: E402
+from quant_researcher_desk.sector_rotation import (  # noqa: E402
+    SectorRotationEntry,
+    SectorRotationState,
+    load_sector_rotation_state,
+    save_sector_rotation_state,
+    select_rotation_entry_for_dispatch,
+)
 from scripts.telegram_notify import TelegramSendError, load_env, post_telegram_document, post_telegram_photo  # noqa: E402
+
+
+UNIVERSE_NODES_PATH = ROOT / "data" / "sector-universe" / "value_chain_nodes.csv"
+UNIVERSE_EDGES_PATH = ROOT / "data" / "sector-universe" / "value_chain_edges.csv"
+ROTATION_STATE_PATH = ROOT / "reports" / "cron-state" / "sector-update.json"
 
 
 def slug(value: str) -> str:
@@ -37,6 +52,8 @@ def company_rows(report: SectorTreeReport) -> list[dict[str, str]]:
                 "role": profile.value_chain_role,
                 "symbol": profile.symbol,
                 "name": profile.name,
+                "gics_sector": profile.gics_sector or report.gics_sector or "local fixture",
+                "gics_industry_group": profile.gics_industry_group or report.gics_industry_group or "local fixture",
                 "industry": profile.industry,
                 "summary": profile.business_summary,
             }
@@ -57,6 +74,30 @@ def relationship_rows(report: SectorTreeReport) -> list[dict[str, str]]:
     ]
 
 
+def relationship_map(report: SectorTreeReport) -> dict[str, object]:
+    def map_items(profiles) -> list[dict[str, str]]:  # type: ignore[no-untyped-def]
+        return [
+            {
+                "symbol": profile.symbol,
+                "name": profile.name,
+                "industry": profile.gics_industry or profile.industry,
+            }
+            for profile in profiles
+        ]
+
+    return {
+        "columns": [
+            {"label": "Upstream", "items": map_items(report.upstream)},
+            {"label": "Midstream", "items": map_items(report.midstream)},
+            {"label": "Downstream", "items": map_items(report.downstream)},
+        ],
+        "edges": [
+            {"source": edge.source_symbol, "target": edge.target_symbol, "relationship": edge.relationship}
+            for edge in report.edges
+        ],
+    }
+
+
 def sector_report_sections(report: SectorTreeReport) -> list[dict[str, object]]:
     role_counts = [
         {"label": "Upstream", "value": len(report.upstream)},
@@ -72,11 +113,16 @@ def sector_report_sections(report: SectorTreeReport) -> list[dict[str, object]]:
             ),
         },
         {
+            "title": "GICS Relationship Map",
+            "summary": "Industry-group view with industries or stocks as drill-down nodes. Arrows show the current evidence path; missing arrows are a sourcing queue, not a clean bill of isolation.",
+            "relationship_map": relationship_map(report),
+        },
+        {
             "title": "Value-Chain Balance",
-            "summary": "Company count by role in this report. This is not a weighting model; it is a map of where the narrative currently has evidence.",
+            "summary": f"Coverage-node count by role in this {report.analysis_level}. This is not a weighting model; it is a map of where the narrative currently has evidence.",
             "chart": {"rows": role_counts},
         },
-        {"title": "Company Profiles", "table": company_rows(report)},
+        {"title": "Coverage Profiles", "table": company_rows(report)},
         {"title": "Relationship Tree", "table": relationship_rows(report)},
         {"title": "Risk Register", "items": list(report.risks)},
         {"title": "Telegram TLDR", "content": report.telegram_tldr},
@@ -86,10 +132,11 @@ def sector_report_sections(report: SectorTreeReport) -> list[dict[str, object]]:
 
 def format_sector_telegram_html(report: SectorTreeReport, include_image: bool = True) -> str:
     tldr_lines = [line for line in report.telegram_tldr.splitlines() if "Educational research only" not in line]
+    scope = report.gics_industry_group or report.request.sector.title()
     return "\n".join(
         [
-            f"<b>{html.escape(report.request.market)} {html.escape(report.request.sector.title())} Sector Desk Note</b>",
-            f"Companies: <code>{len(report.upstream) + len(report.midstream) + len(report.downstream)}</code> | Relationships: <code>{len(report.edges)}</code>",
+            f"<b>{html.escape(report.request.market)} {html.escape(scope)} Desk Note</b>",
+            f"Level: <code>{html.escape(report.analysis_level)}</code> | Nodes: <code>{len(report.upstream) + len(report.midstream) + len(report.downstream)}</code> | Relationships: <code>{len(report.edges)}</code>",
             "",
             html.escape("\n".join(tldr_lines)),
             "",
@@ -131,6 +178,32 @@ def render_preview_image(
         return None
 
 
+def load_universe_rotation() -> tuple[SectorRotationEntry, ...]:
+    if not UNIVERSE_NODES_PATH.exists():
+        return ()
+    nodes = priority_rotation_nodes(load_industry_nodes_csv(UNIVERSE_NODES_PATH))
+    return tuple(
+        SectorRotationEntry(
+            market=node.market,
+            sector=node.gics_industry_group,
+            note=f"GICS {node.gics_sector} industry group; representative industry {node.name} ({node.code}).",
+        )
+        for node in nodes
+    )
+
+
+def build_report_with_available_provider(request: SectorTreeRequest) -> SectorTreeReport:
+    try:
+        return build_sector_tree_report(request, FixtureSectorTreeProvider())
+    except SectorTreeError:
+        if not UNIVERSE_NODES_PATH.exists() or not UNIVERSE_EDGES_PATH.exists():
+            raise
+        return build_sector_tree_report(
+            request,
+            IndustryUniverseSectorTreeProvider(UNIVERSE_NODES_PATH, UNIVERSE_EDGES_PATH),
+        )
+
+
 def main() -> int:
     env = load_env(ROOT / ".env.example")
     env.update(load_env(ROOT / ".env"))
@@ -141,6 +214,12 @@ def main() -> int:
     parser.add_argument("--market", default="US", help="Market code, for example US or HK.")
     parser.add_argument("--sector", default="semiconductors", help="Fixture-backed sector name.")
     parser.add_argument("--rotate", action="store_true", help="Use the configured daily HK/US sector rotation.")
+    parser.add_argument(
+        "--rotation-cadence-minutes",
+        type=int,
+        default=24 * 60,
+        help="When rotating, advance the sector on this cadence. Default is daily.",
+    )
     parser.add_argument("--focus-symbol", action="append", default=[], help="Optional symbol to include; repeat for multiple symbols.")
     parser.add_argument("--max-companies-per-group", type=int)
     parser.add_argument("--output-dir", type=pathlib.Path, default=ROOT / "reports" / "sector-tree")
@@ -154,11 +233,46 @@ def main() -> int:
 
     market = args.market
     sector = args.sector
+    rotation_state: SectorRotationState | None = None
     if args.rotate:
-        rotation_entry = select_sector_rotation_entry()
+        current_time = dt.datetime.now()
+        universe_rotation = load_universe_rotation()
+        if universe_rotation:
+            rotation_entry, already_processed = select_rotation_entry_for_dispatch(
+                current_time=current_time,
+                rotation=universe_rotation,
+                cadence_minutes=args.rotation_cadence_minutes,
+                state_path=ROTATION_STATE_PATH,
+            )
+        else:
+            rotation_entry, already_processed = select_rotation_entry_for_dispatch(
+                current_time=current_time,
+                cadence_minutes=args.rotation_cadence_minutes,
+                state_path=ROTATION_STATE_PATH,
+            )
+        if already_processed:
+            stored_state = load_sector_rotation_state(ROTATION_STATE_PATH)
+            if stored_state is not None:
+                print(
+                    "sector rotation skipped: "
+                    f"sent_at_epoch={stored_state.sent_at_epoch} market={stored_state.market} "
+                    f"sector={stored_state.sector} cadence={stored_state.cadence_minutes}m already consumed"
+                )
+            else:
+                print("sector rotation skipped: current cadence bucket already consumed")
+            return 0
         market = rotation_entry.market
         sector = rotation_entry.sector
-        print(f"sector rotation selected: {market} {sector} - {rotation_entry.note}")
+        rotation_state = SectorRotationState(
+            sent_at_epoch=int(current_time.replace(second=0, microsecond=0).timestamp()),
+            market=market,
+            sector=sector,
+            cadence_minutes=args.rotation_cadence_minutes,
+        )
+        print(
+            f"sector rotation selected: {market} {sector} "
+            f"(cadence={args.rotation_cadence_minutes}m) - {rotation_entry.note}"
+        )
 
     request = SectorTreeRequest(
         market=market,
@@ -167,16 +281,20 @@ def main() -> int:
         max_companies_per_group=args.max_companies_per_group,
     )
     try:
-        report = build_sector_tree_report(request)
+        report = build_report_with_available_provider(request)
     except SectorTreeError as exc:
         print(f"sector tree report failed: {exc}", file=sys.stderr)
         return 1
 
-    title = f"{report.request.market} {report.request.sector.title()} Sector Tree"
+    scope_title = report.gics_industry_group or report.request.sector.title()
+    title = f"{report.request.market} {scope_title} {report.analysis_level.title()} Map"
     metadata = {
         "market": report.request.market,
-        "sector": report.request.sector.title(),
-        "companies": len(report.upstream) + len(report.midstream) + len(report.downstream),
+        "analysis_level": report.analysis_level,
+        "gics_sector": report.gics_sector or "local fixture",
+        "gics_industry_group": report.gics_industry_group or "local fixture",
+        "drill_down_industries": ", ".join(report.drill_down_industries) if report.drill_down_industries else "local fixture",
+        "coverage_nodes": len(report.upstream) + len(report.midstream) + len(report.downstream),
         "relationships": len(report.edges),
     }
     sections = sector_report_sections(report)
@@ -206,6 +324,9 @@ def main() -> int:
             post_telegram_document(token, chat_id, attachment, caption="Detailed sector report attached.")
         else:
             post_telegram_document(token, chat_id, attachment, caption=caption, parse_mode="HTML")
+        if rotation_state is not None:
+            save_sector_rotation_state(ROTATION_STATE_PATH, rotation_state)
+            print(f"rotation state saved: {ROTATION_STATE_PATH}")
     except TelegramSendError as exc:
         print(f"telegram notification failed: {exc}", file=sys.stderr)
         return 1

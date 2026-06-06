@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and optionally send an options research report attachment."""
+"""Build and optionally send an HK Finance breadth-first power-map report."""
 
 from __future__ import annotations
 
@@ -13,20 +13,14 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from quant_researcher_desk.moomoo_options_report import MoomooOpenDQuoteClient, OptionsReportError  # noqa: E402
-from quant_researcher_desk.options_research import (  # noqa: E402
-    FixtureOptionsResearchProvider,
-    OptionsResearchRequest,
-    build_options_research_report,
-    format_options_telegram_html,
-    options_report_sections,
+from quant_researcher_desk.hk_sector_power_map import (  # noqa: E402
+    FinancePowerMapError,
+    FinancePowerMapRequest,
+    build_hk_finance_power_map_report,
+    finance_power_map_sections,
+    format_hk_finance_telegram_html,
 )
-from quant_researcher_desk.reporting import (  # noqa: E402
-    ReportRenderError,
-    render_image_report,
-    render_pdf_report,
-    write_html_report,
-)
+from quant_researcher_desk.reporting import ReportRenderError, render_image_report, render_pdf_report, write_html_report  # noqa: E402
 from scripts.telegram_notify import TelegramSendError, load_env, post_telegram_document, post_telegram_photo  # noqa: E402
 
 
@@ -70,72 +64,48 @@ def main() -> int:
     env = load_env(ROOT / ".env.example")
     env.update(load_env(ROOT / ".env"))
 
-    parser = argparse.ArgumentParser(description="Build an options pricing, scenario, and thesis report.")
+    parser = argparse.ArgumentParser(
+        description="Build an HK Finance breadth-first power-map report.",
+        epilog=(
+            "Run:\n"
+            "  uv --cache-dir .uv-cache run --python 3.10 python scripts/send_hk_sector_power_map.py --market HK --sector finance --dry-run\n"
+            "  uv --cache-dir .uv-cache run --python 3.10 python scripts/send_hk_sector_power_map.py --market HK --sector finance --post"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print the Telegram caption and attachment path without posting.")
     parser.add_argument("--post", action="store_true", help="Post the report attachment when TELEGRAM_NOTIFY_ENABLED=true.")
-    parser.add_argument("--fixture", action="store_true", help="Use deterministic local fixture data instead of Moomoo OpenD.")
-    parser.add_argument("--symbol", default=env.get("MOOMOO_DEFAULT_SYMBOL", "US.TSM"))
-    parser.add_argument("--option-code")
-    parser.add_argument("--option-type", choices=("CALL", "PUT"), default="CALL")
-    parser.add_argument("--strike", type=float)
-    parser.add_argument("--expiry", help="Expiry date in YYYY-MM-DD format. Defaults to nearest future expiry.")
-    parser.add_argument("--historical-volatility", type=float, default=0.35)
-    parser.add_argument("--risk-free-rate", type=float, default=0.04)
-    parser.add_argument("--output-dir", type=pathlib.Path, default=ROOT / "reports" / "options")
+    parser.add_argument("--market", default="HK", help="Market code, expected to be HK for this trial module.")
+    parser.add_argument("--sector", default="finance", help="HK sector to map. The first trial supports finance only.")
+    parser.add_argument("--output-dir", type=pathlib.Path, default=ROOT / "reports" / "hk-sector-power-map" / "finance")
     parser.add_argument("--report-format", choices=("pdf", "html"), default="pdf")
-    parser.add_argument("--pricing-engine", choices=("legacy", "quantlib"), default="legacy")
-    parser.add_argument("--shadow-compare", action="store_true", help="Add legacy-vs-QuantLib shadow comparison metadata and sections.")
-    parser.add_argument(
-        "--visual-explainer",
-        action="store_true",
-        help="Add Black-Scholes and Monte Carlo visual explainer sections to the report.",
-    )
     parser.add_argument(
         "--render-image",
         action="store_true",
         help="Render/send a PNG preview using Playwright's managed Chromium only.",
     )
-    parser.add_argument("--opend-host", default=env.get("MOOMOO_OPEND_HOST", "127.0.0.1"))
-    parser.add_argument("--opend-port", type=int, default=int(env.get("MOOMOO_OPEND_PORT", "11111")))
     args = parser.parse_args()
 
-    request = OptionsResearchRequest(
-        symbol=args.symbol,
-        option_code=args.option_code,
-        option_type=args.option_type,
-        strike=args.strike,
-        expiry=args.expiry,
-        historical_volatility=args.historical_volatility,
-        risk_free_rate=args.risk_free_rate,
-        pricing_engine=args.pricing_engine,
-        shadow_compare=args.shadow_compare,
-    )
-
+    request = FinancePowerMapRequest(market=args.market, sector=args.sector)
     try:
-        if args.fixture:
-            report = build_options_research_report(FixtureOptionsResearchProvider(), request)
-        else:
-            with MoomooOpenDQuoteClient(host=args.opend_host, port=args.opend_port) as provider:
-                report = build_options_research_report(provider, request)
-    except (OptionsReportError, OSError) as exc:
-        print(f"options research report failed: {exc}", file=sys.stderr)
+        report = build_hk_finance_power_map_report(request)
+    except FinancePowerMapError as exc:
+        print(f"hk finance power map failed: {exc}", file=sys.stderr)
         return 1
 
-    title = f"{report.symbol} Options Research {report.contract.expiry} {report.contract.strike:g} {report.contract.option_type}"
-    sections = options_report_sections(report, include_visual_explainer=args.visual_explainer)
+    title = "HK Finance Breadth-First Power Map"
+    sections = finance_power_map_sections(report)
     metadata = {
         "generated_at": report.generated_at.strftime("%Y-%m-%d %H:%M:%S %Z").strip(),
-        "symbol": report.symbol,
-        "contract": report.contract.code,
-        "verdict": report.verdict,
-        "pricing_engine": report.pricing_engine,
-        "shadow_compare": "yes" if report.shadow_compare else "no",
-        "shadow_status": (report.quantlib_vs_legacy_diff or {}).get("status", "off"),
-        "visual_explainer": "yes" if args.visual_explainer else "no",
+        "market": report.request.market,
+        "sector": report.request.sector,
+        "nodes": len(report.upstream) + len(report.midstream) + len(report.downstream),
+        "edges": len(report.edges),
+        "tradingview_sector": report.tradingview_sector,
     }
     attachment = render_attachment(title, sections, metadata, args.output_dir, args.report_format)
     preview_image = render_preview_image(title, sections, metadata, args.output_dir) if args.render_image else None
-    caption = format_options_telegram_html(report, include_image=preview_image is not None)
+    caption = format_hk_finance_telegram_html(report, include_image=preview_image is not None)
 
     if args.dry_run or not args.post:
         print(caption)
@@ -156,7 +126,7 @@ def main() -> int:
     try:
         if preview_image:
             post_telegram_photo(token, chat_id, preview_image, caption=caption, parse_mode="HTML")
-            post_telegram_document(token, chat_id, attachment, caption="Detailed options report attached.")
+            post_telegram_document(token, chat_id, attachment, caption="HK Finance PDF report attached.")
         else:
             post_telegram_document(token, chat_id, attachment, caption=caption, parse_mode="HTML")
     except TelegramSendError as exc:
@@ -171,3 +141,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
