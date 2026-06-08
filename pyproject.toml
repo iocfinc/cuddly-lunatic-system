@@ -6,6 +6,8 @@ readme = "AGENTS.md"
 requires-python = ">=3.10"
 dependencies = [
     "moomoo-api>=10.4.6408",
+    "notion-client>=2.3.0",
+    "QuantLib",
 ]
 
 [tool.uv]

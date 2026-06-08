@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import sys
 import urllib.error
@@ -12,11 +13,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from quant_researcher_desk.moomoo_options_report import MoomooOpenDQuoteClient, OptionsReportError  # noqa: E402
+from quant_researcher_desk.execution_recovery import SymbolExecutionError  # noqa: E402
+from quant_researcher_desk.moomoo_options_report import MoomooOpenDQuoteClient  # noqa: E402
 from quant_researcher_desk.options_research import OptionsResearchRequest  # noqa: E402
 from quant_researcher_desk.reporting import ReportRenderError, render_pdf_report, write_html_report  # noqa: E402
 from quant_researcher_desk.tradingagents_packet import (  # noqa: E402
-    TradingAgentsIntegrationError,
     TradingAgentsPacketRequest,
     build_decision_packet,
     build_desk_evidence_pack,
@@ -24,7 +25,7 @@ from quant_researcher_desk.tradingagents_packet import (  # noqa: E402
     format_decision_packet_telegram_html,
     load_tradingagents_config,
     persist_decision_packet,
-    run_tradingagents_debate,
+    run_tradingagents_debate_for_symbol,
 )
 from scripts.telegram_notify import TelegramSendError, load_env, post_telegram_document  # noqa: E402
 
@@ -50,6 +51,7 @@ def render_attachment(
 def main() -> int:
     env = load_env(ROOT / ".env.example")
     env.update(load_env(ROOT / ".env"))
+    os.environ.update({key: value for key, value in env.items() if value})
 
     parser = argparse.ArgumentParser(description="Build a TradingAgents-backed research decision packet.")
     parser.add_argument("--dry-run", action="store_true", help="Print the caption, attachment path, and artifact path without posting.")
@@ -73,7 +75,7 @@ def main() -> int:
     config_env = dict(env)
     if args.results_dir:
         config_env["TRADINGAGENTS_RESULTS_DIR"] = str(args.results_dir)
-    config = load_tradingagents_config(ROOT, env=config_env)
+    config = load_tradingagents_config(ROOT, env=env, runtime_env=config_env)
 
     request = OptionsResearchRequest(
         symbol=args.symbol,
@@ -106,14 +108,17 @@ def main() -> int:
         else:
             with MoomooOpenDQuoteClient(host=args.opend_host, port=args.opend_port) as provider:
                 evidence_pack = build_desk_evidence_pack(provider, request)
-    except (OptionsReportError, OSError) as exc:
+    except SymbolExecutionError as exc:
+        print(f"tradingagents packet failed: {exc.single_symbol_message()}", file=sys.stderr)
+        return 1
+    except OSError as exc:
         print(f"tradingagents packet failed: {exc}", file=sys.stderr)
         return 1
 
     try:
-        debate = run_tradingagents_debate(config, packet_request, evidence_pack, fixture=args.fixture)
-    except TradingAgentsIntegrationError as exc:
-        print(f"tradingagents packet failed: {exc}", file=sys.stderr)
+        debate = run_tradingagents_debate_for_symbol(config, packet_request, evidence_pack, fixture=args.fixture)
+    except SymbolExecutionError as exc:
+        print(f"tradingagents packet failed: {exc.single_symbol_message()}", file=sys.stderr)
         return 1
 
     packet = build_decision_packet(

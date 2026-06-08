@@ -1,5 +1,5 @@
 #!/usr/bin/env zsh
-# Headless daily HK tech sector value-chain brief for Quant Researcher Desk.
+# Headless rotating sector value-chain brief for Quant Researcher Desk.
 
 set -u
 
@@ -40,5 +40,6 @@ cd "$ROOT" || exit 1
 "$UV" --cache-dir "$ROOT/.uv-cache" run python scripts/send_sector_tree_report.py \
   "$send_mode" \
   --rotate \
+  --rotation-cadence-minutes 180 \
   --report-format pdf \
   --output-dir "$ROOT/reports/sector-tree"

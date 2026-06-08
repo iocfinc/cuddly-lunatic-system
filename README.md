@@ -4,6 +4,105 @@ Quant Researcher Desk is an agentic options research system for retail and indep
 
 The current repository includes a working local Moomoo OpenD integration for `US.TSM` options reporting, Telegram notification tooling, and the planning documents for a broader quantitative research stack. The intended direction is a research desk that can fetch options data, calculate pricing and Greeks, frame risk-first theses, and turn each run into a structured memo rather than a trading signal.
 
+The closed-form pricing core now supports a shadow migration path: `legacy` keeps the repo-owned Black-Scholes and IV implementation, while `quantlib` becomes available when the `QuantLib` Python package is installed. Market data, weekly workflow orchestration, Monte Carlo intuition, and report rendering stay repo-owned.
+
+## Get Started
+
+The best first run in this repo is the fixture-backed weekly options screen. It shows the full workflow without needing OpenD or Telegram first.
+
+Quickstart commands:
+
+```sh
+brew install uv
+cp .env.example .env
+mkdir -p ~/.codex/skills
+cp -R /Users/iraoliverfernando/Desktop/Dioscuri/CodexSkills/.agents/skills/clear-technical-writing ~/.codex/skills/clear-technical-writing
+./scripts/install-hooks.sh
+uv --cache-dir .uv-cache run python scripts/preflight.py --hook manual
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --fixture --report-format html
+LATEST_HTML=$(ls -t reports/weekly-options/*-weekly-shortlist.html | head -n 1)
+open "$LATEST_HTML"
+```
+
+Step-by-step:
+
+1. Install `uv`.
+
+```sh
+brew install uv
+```
+
+2. Create your local-only environment file.
+
+```sh
+cp .env.example .env
+```
+
+3. Install the local writing skill this repo uses for explanation-first copy.
+
+```sh
+mkdir -p ~/.codex/skills
+cp -R /Users/iraoliverfernando/Desktop/Dioscuri/CodexSkills/.agents/skills/clear-technical-writing ~/.codex/skills/clear-technical-writing
+```
+
+The canonical skill name for this repo is `clear-technical-writing`. The public `codex-ai-lab-skills` checkout on this machine currently exposes a different inventory under `SKILLS/`, including `anti-slop-editorial`, so the local `CodexSkills` mirror is the source-of-truth install path for now.
+
+4. Restart Codex so the new skill is available in the session.
+
+5. Install the local Git hooks.
+
+```sh
+./scripts/install-hooks.sh
+```
+
+6. Run the preflight check once.
+
+```sh
+uv --cache-dir .uv-cache run python scripts/preflight.py --hook manual
+```
+
+7. Run the weekly options screen in fixture mode first.
+
+```sh
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --fixture --report-format html
+```
+
+8. Open the newest generated HTML report.
+
+```sh
+LATEST_HTML=$(ls -t reports/weekly-options/*-weekly-shortlist.html | head -n 1)
+open "$LATEST_HTML"
+```
+
+9. If you want to inspect the machine-readable payload in the terminal, open the newest JSON artifact.
+
+```sh
+LATEST_JSON=$(ls -t reports/weekly-options/*-weekly-shortlist.json | head -n 1)
+python -m json.tool "$LATEST_JSON" | less
+```
+
+10. When you want live data, start and log into Moomoo OpenD, then rerun without `--fixture`.
+
+```sh
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --report-format pdf
+```
+
+The live run keeps the machine-readable CSV and JSON outputs, writes the teaching-first HTML explainer, and derives a PDF companion for upload or attachment.
+
+## What The Weekly Options Screen Is Doing
+
+The weekly screen is now stock-first by default. It starts from a broad US universe pulled from Moomoo plates, fetches daily bars, classifies each stock into a deterministic trend regime, runs a light stock review on bullish and bearish names, then filters the option chain to aligned direction only: CALLs for bullish names, PUTs for bearish names. Mixed or no-trade stock context produces no weekly directional candidate. The outputs are split by audience: CSV and JSON for machine workflows, HTML and PDF for human review. The shortlist is a research queue, not a trade instruction.
+
+The current strategy lane is intentionally narrow: long single-leg options for resale, not hedging and not exercise into stock. The ranking now explicitly prefers contracts that are easier to exit later: directionally aligned, inside the working delta band, liquid enough to review seriously, and visibly penalized when event timing is risky or unknown.
+
+Optional reviewer lane:
+
+- `--review-shortlist` runs deterministic shortlist checks after ranking
+- reviewer statuses are `Candidate`, `Watch`, `Reject`, or `Needs Human Review`
+- `--reviewer-model` adds a non-blocking portfolio-manager summary on top of the deterministic review
+- `--analysis-mode options-first` keeps the temporary comparison path for validation and rollback
+- `--no-stock-review` disables the stock-review gate when you need a deterministic regime-only comparison
+
 ## What This Repository Is For
 
 This repository is building a personal quant research desk for:
@@ -30,6 +129,7 @@ Implemented now:
 - local Moomoo OpenD quote integration
 - `US.TSM` options report script with ranked calls and puts
 - fixture-backed options pricing, Greeks, IV, scenario, and verdict pipeline
+- QuantLib shadow-compare seam for closed-form pricing migration
 - fixture-backed US/HK sector value-chain tree reports
 - institutional HTML report rendering with optional PDF export through Playwright
 - unit tests for report formatting, ranking logic, and Telegram payloads
@@ -68,13 +168,21 @@ The product is organized around a small set of workflows:
 
 Tracked planning docs live in [internal-notes/PRD.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/PRD.md), [internal-notes/acceptance-criteria-QA.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/acceptance-criteria-QA.md), and [internal-notes/design-branding.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/design-branding.md).
 
+Framework audit and migration rationale live in [internal-notes/quant-framework-audit.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/quant-framework-audit.md).
+
+The product-specific spec workflow now lives under [internal-notes/glossary/development-model.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/glossary/development-model.md), with weekly-lane feature packs at [internal-notes/features/weekly-underlying-gate/PRD.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/features/weekly-underlying-gate/PRD.md) and [internal-notes/features/long-single-leg-weekly-lane/PRD.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/features/long-single-leg-weekly-lane/PRD.md).
+
+The verified OpenD wrapper surface for this repo is documented in [internal-notes/features/long-single-leg-weekly-lane/ADR-002-opend-capability-surface.md](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/internal-notes/features/long-single-leg-weekly-lane/ADR-002-opend-capability-surface.md) and mirrored in code through `opend_capability_contract()` in [src/quant_researcher_desk/moomoo_options_report.py](/Users/iraoliverfernando/Desktop/Dioscuri/naval-analyst/src/quant_researcher_desk/moomoo_options_report.py).
+
 ## Repository Layout
 
 - `src/` contains product code
 - `tests/` contains unit tests
 - `scripts/` contains local operational scripts
-- `docs/` contains tracked visual and documentation artifacts
-- `internal-notes/` contains PRD, QA criteria, and design guidance
+- `docs/` contains rendered visual and user-facing artifacts
+- `internal-notes/` contains product specs, ADRs, templates, and design guidance
+
+Use `internal-notes/` as the source of truth for product rules, strategy scope, and implementation ADRs. Keep `docs/` focused on rendered explainers, visuals, and user-facing artifacts.
 
 Current implementation highlights:
 
@@ -114,6 +222,8 @@ Install local hooks:
 ./scripts/install-hooks.sh
 ```
 
+If you are using the weekly options screen as the first workflow, install `clear-technical-writing` into `~/.codex/skills` and restart Codex before the first run. The repo uses that skill name as the local writing source of truth even though the public skill checkout currently uses different names.
+
 ## Validation
 
 Run the scaffold preflight:
@@ -126,6 +236,12 @@ Run unit tests:
 
 ```sh
 uv --cache-dir .uv-cache run pytest
+```
+
+Run the fixture-backed weekly screen:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --fixture --report-format html
 ```
 
 ## Telegram Notifications
@@ -196,6 +312,12 @@ The fuller options research flow prices a selected contract, computes Greeks, co
 uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --dry-run --fixture --symbol US.TEST --report-format html
 ```
 
+Enable the visual explainer and migration diagnostics when you want the teaching and parity views:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --dry-run --fixture --symbol US.TEST --report-format html --visual-explainer --shadow-compare --pricing-engine legacy
+```
+
 Use live Moomoo OpenD data by omitting `--fixture` after OpenD is running:
 
 ```sh
@@ -203,6 +325,54 @@ uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --po
 ```
 
 The script attempts PDF output by default. If Playwright/Chromium is unavailable, it writes the printable HTML companion and uses that as the attachment path.
+
+## Weekly Shortlist Reviewer
+
+Run the fixture-backed weekly screen with reviewer annotations and shadow comparison:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --fixture --report-format html --shadow-compare --review-shortlist --pricing-engine legacy
+```
+
+Add an LLM summary layer on top of the deterministic reviewer:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --fixture --review-shortlist --reviewer-model gpt-5.4-mini
+```
+
+The reviewer is non-blocking by design. CSV, JSON, HTML, and PDF artifacts are still written even when the reviewer only adds caution flags or the LLM summary falls back to a deterministic summary.
+
+## Weekly Options Screen
+
+Use this workflow when you want a broad US weekly shortlist instead of a single-name report.
+
+Fixture-backed first run:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --fixture --report-format html
+```
+
+Live OpenD rerun:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/run_weekly_options_screen.py --report-format pdf
+```
+
+The workflow writes artifacts under `reports/weekly-options/`:
+
+- `*-weekly-shortlist.csv` for tabular downstream use
+- `*-weekly-shortlist.json` for automation and inspection
+- `*-weekly-shortlist.html` as the primary explainer artifact
+- `*-weekly-shortlist.pdf` as the printable and upload-friendly companion
+
+The generated HTML explains:
+
+- what this run is
+- how universe discovery works
+- why some names were skipped
+- how contracts are filtered
+- how scoring works
+- how to read the ranked shortlist safely
 
 ## TradingAgents Research Decision Packet
 
@@ -231,7 +401,13 @@ TRADINGAGENTS_CODEX_PROFILE=
 TRADINGAGENTS_RESULTS_DIR=data/tradingagents/results
 TRADINGAGENTS_CACHE_DIR=data/tradingagents/cache
 TRADINGAGENTS_MEMORY_DIR=data/tradingagents/memory
+TRADINGAGENTS_SOURCE_DIR=../TradingAgents
 TRADINGAGENTS_ALLOW_EXECUTION=false
+ABACUS_API_KEY=
+ABACUS_BASE_URL=https://routellm.abacus.ai/v1
+ABACUS_DEEP_MODEL=gpt-5.4
+ABACUS_QUICK_MODEL=gpt-5.4-mini
+ABACUS_AGENT_MODEL_MAP='{"market":"gpt-5.4-mini","social":"gpt-5.4-mini","news":"gpt-5.4-mini","fundamentals":"gpt-5.4-mini","risk_reflection":"gpt-5.4-mini","bull_researcher":"gpt-5.4","bear_researcher":"gpt-5.4","research_manager":"gpt-5.4","trader":"gpt-5.4","portfolio_manager":"gpt-5.4"}'
 ```
 
 Backend options:
@@ -240,6 +416,22 @@ Backend options:
 - `TRADINGAGENTS_LLM_BACKEND=codex` uses a headless `codex exec` JSON contract, defaulting to `gpt-5.4`
 
 When `TRADINGAGENTS_ENABLED=true` and the upstream dependency is installed locally, the script can attempt a live adapter run. The output is still normalized into research-only labels: `Research Candidate`, `Watchlist`, `Reject`, or `Needs Human Review`.
+
+## TradingAgents Watchlist Digest
+
+The watchlist digest flow reads the Moomoo OpenD watchlist, evaluates the selected names through the repo-owned TradingAgents adapter seam, and publishes one ranked attachment plus one concise Telegram caption.
+
+Fixture-backed dry-run:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_tradingagents_watchlist_digest.py --dry-run --fixture --symbols US.NVDA,US.TSM,US.META --report-format html
+```
+
+Live OpenD scan:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_tradingagents_watchlist_digest.py --post --max-candidates 5 --top-n 3
+```
 
 ## Sector Universe and Newsletter Report
 
