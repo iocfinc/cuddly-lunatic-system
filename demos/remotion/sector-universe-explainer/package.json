@@ -1,0 +1,33 @@
+{
+  "name": "sector-universe-explainer",
+  "version": "1.0.0",
+  "description": "Remotion explainer for the Quant Researcher Desk sector universe workflow",
+  "repository": {},
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "@remotion/cli": "4.0.454",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.454"
+  },
+  "devDependencies": {
+    "@remotion/eslint-config-flat": "4.0.454",
+    "@remotion/eslint-plugin": "^4.0.454",
+    "@types/react": "19.2.7",
+    "@types/web": "0.0.166",
+    "eslint": "9.19.0",
+    "prettier": "3.8.1",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "dev": "remotion studio",
+    "still": "remotion still SectorUniverseExplainer out/frame-60.png --frame=60",
+    "render": "remotion render SectorUniverseExplainer out/sector-universe-explainer.mp4",
+    "render:gif": "remotion render SectorUniverseExplainer out/sector-universe-explainer.gif",
+    "lint": "eslint src && tsc"
+  },
+  "sideEffects": [
+    "*.css"
+  ]
+}

@@ -8,10 +8,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from quant_researcher_desk.moomoo_options_report import (  # noqa: E402
+    MoomooOpenDQuoteClient,
     RISK_NOTE,
     build_options_report,
     format_telegram_html,
     nearest_expiry,
+    normalize_records,
+    opend_capability_contract,
     target_expiry,
 )
 
@@ -101,3 +104,55 @@ def test_telegram_html_escapes_text_and_includes_required_fields() -> None:
     assert "Strike | Last | IV | Delta | OI | Vol" in message
     assert "105.00 | 2.50 | 0.44 | 0.350 | 80 | 100" in message
     assert RISK_NOTE in message
+
+
+class FakeOpenDContext:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def get_plate_list(self, market: object, plate_class: object) -> tuple[int, list[dict[str, object]]]:
+        assert market is not None
+        assert plate_class is not None
+        return 0, [
+            {"code": "US.TECH", "plate_name": "Technology"},
+            {"code": "US.MEGA", "stock_name": "Mega Caps"},
+        ]
+
+    def get_plate_stock(self, plate_code: str) -> tuple[int, list[dict[str, object]]]:
+        assert plate_code == "US.TECH"
+        return 0, [
+            {"code": "US.NVDA", "stock_name": "NVIDIA"},
+            {"code": "US.MSFT", "stock_name": "Microsoft"},
+        ]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_normalize_records_handles_sequence_payloads() -> None:
+    rows = normalize_records([{"code": "US.AAPL"}, {"code": "US.MSFT"}])
+
+    assert rows == [{"code": "US.AAPL"}, {"code": "US.MSFT"}]
+
+
+def test_opend_quote_client_plate_helpers_normalize_rows_without_live_socket() -> None:
+    client = MoomooOpenDQuoteClient()
+    client._ctx = FakeOpenDContext()
+
+    plates = client.get_plate_list("US", "ALL")
+    constituents = client.get_plate_constituents("US.TECH")
+
+    assert [row["code"] for row in plates] == ["US.TECH", "US.MEGA"]
+    assert [row["code"] for row in constituents] == ["US.NVDA", "US.MSFT"]
+
+
+def test_opend_capability_contract_marks_verified_and_optional_scoring_fields() -> None:
+    capabilities = {item.name: item for item in opend_capability_contract()}
+
+    assert capabilities["plate_list"].status == "verified"
+    assert capabilities["daily_bars"].workflow_stage == "stock_context"
+    assert capabilities["option_expirations"].workflow_stage == "weekly_expiry"
+    assert capabilities["delta"].status == "verified_when_present"
+    assert capabilities["delta"].ranking_eligible is True
+    assert capabilities["bid_ask_spread"].status == "unsupported_for_scoring"
+    assert capabilities["event_calendar"].workflow_stage == "event_context"

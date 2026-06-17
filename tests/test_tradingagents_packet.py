@@ -17,13 +17,16 @@ from quant_researcher_desk.tradingagents_packet import (
     TradingAgentsIntegrationError,
     TradingAgentsPacketRequest,
     _codex_backend_debate,
+    _upstream_tradingagents_symbol,
     build_decision_packet,
     build_desk_evidence_pack,
     decision_packet_sections,
     format_decision_packet_telegram_html,
     load_tradingagents_config,
     run_tradingagents_debate,
+    run_tradingagents_debate_for_symbol,
 )
+from quant_researcher_desk.execution_recovery import SymbolExecutionError
 
 
 def test_load_tradingagents_config_defaults_to_repo_local_disabled_state(tmp_path: pathlib.Path) -> None:
@@ -40,9 +43,16 @@ def test_load_tradingagents_config_defaults_to_repo_local_disabled_state(tmp_pat
     assert config.results_dir == tmp_path / "results"
     assert config.cache_dir == tmp_path / "cache"
     assert config.memory_dir == tmp_path / "memory"
+    assert config.source_dir == ROOT.parent / "TradingAgents"
     assert config.llm_backend == "api"
     assert config.codex_model == "gpt-5.4"
     assert config.codex_profile is None
+
+
+def test_upstream_tradingagents_symbol_strips_us_prefix_for_yfinance_path() -> None:
+    assert _upstream_tradingagents_symbol("US.TSM") == "TSM"
+    assert _upstream_tradingagents_symbol("US.NVDA") == "NVDA"
+    assert _upstream_tradingagents_symbol("HK.00700") == "HK.00700"
 
 
 def test_load_tradingagents_config_process_env_overrides_dotenv_values(tmp_path: pathlib.Path) -> None:
@@ -97,6 +107,7 @@ def test_run_tradingagents_debate_fixture_builds_research_only_packet() -> None:
             results_dir=ROOT / "data" / "tradingagents" / "results",
             cache_dir=ROOT / "data" / "tradingagents" / "cache",
             memory_dir=ROOT / "data" / "tradingagents" / "memory",
+            source_dir=ROOT.parent / "TradingAgents",
             allow_execution=False,
             llm_backend="api",
             codex_model="gpt-5.4",
@@ -122,6 +133,55 @@ def test_run_tradingagents_debate_fixture_builds_research_only_packet() -> None:
     assert "EXECUTE" not in rendered.upper()
 
 
+def test_build_desk_evidence_pack_normalizes_symbol_level_options_failures() -> None:
+    class NoExpiryProvider(FixtureOptionsResearchProvider):
+        def get_option_expirations(self, symbol: str) -> list[str]:
+            return []
+
+    with pytest.raises(SymbolExecutionError, match="reason=no_expirations"):
+        build_desk_evidence_pack(
+            NoExpiryProvider(),
+            OptionsResearchRequest(symbol="US.TEST"),
+            now=dt.datetime(2026, 5, 3, 9, 30, tzinfo=dt.timezone.utc),
+        )
+
+
+def test_run_tradingagents_debate_for_symbol_normalizes_backend_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = dt.datetime(2026, 5, 3, 9, 30, tzinfo=dt.timezone.utc)
+    evidence_pack = build_desk_evidence_pack(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(symbol="US.TEST"),
+        now=now,
+    )
+
+    def fake_run(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise TradingAgentsIntegrationError("codex exec failed: model unavailable")
+
+    monkeypatch.setattr("quant_researcher_desk.tradingagents_packet.run_tradingagents_debate", fake_run)
+
+    with pytest.raises(SymbolExecutionError, match="reason=debate_backend_failed"):
+        run_tradingagents_debate_for_symbol(
+            TradingAgentsConfig(
+                enabled=True,
+                ref="refs/tags/v0.2.4",
+                llm_provider="openai",
+                results_dir=ROOT / "data" / "tradingagents" / "results",
+                cache_dir=ROOT / "data" / "tradingagents" / "cache",
+                memory_dir=ROOT / "data" / "tradingagents" / "memory",
+                source_dir=ROOT.parent / "TradingAgents",
+                allow_execution=False,
+                llm_backend="api",
+                codex_model="gpt-5.4",
+                codex_profile=None,
+            ),
+            TradingAgentsPacketRequest(symbol="US.TEST"),
+            evidence_pack,
+            fixture=False,
+        )
+
+
 def test_run_tradingagents_debate_requires_enablement_for_live_path() -> None:
     now = dt.datetime(2026, 5, 3, 9, 30, tzinfo=dt.timezone.utc)
     evidence_pack = build_desk_evidence_pack(
@@ -139,6 +199,7 @@ def test_run_tradingagents_debate_requires_enablement_for_live_path() -> None:
                 results_dir=ROOT / "data" / "tradingagents" / "results",
                 cache_dir=ROOT / "data" / "tradingagents" / "cache",
                 memory_dir=ROOT / "data" / "tradingagents" / "memory",
+                source_dir=ROOT.parent / "TradingAgents",
                 allow_execution=False,
                 llm_backend="api",
                 codex_model="gpt-5.4",
@@ -176,6 +237,7 @@ def test_run_tradingagents_debate_reports_missing_dependency_actionably(monkeypa
                 results_dir=ROOT / "data" / "tradingagents" / "results",
                 cache_dir=ROOT / "data" / "tradingagents" / "cache",
                 memory_dir=ROOT / "data" / "tradingagents" / "memory",
+                source_dir=ROOT.parent / "TradingAgents",
                 allow_execution=False,
                 llm_backend="api",
                 codex_model="gpt-5.4",
@@ -204,6 +266,7 @@ def test_codex_backend_debate_uses_headless_codex_json_payload(
         results_dir=tmp_path / "results",
         cache_dir=tmp_path / "cache",
         memory_dir=tmp_path / "memory",
+        source_dir=ROOT.parent / "TradingAgents",
         allow_execution=False,
         llm_backend="codex",
         codex_model="gpt-5.4",
@@ -267,6 +330,7 @@ def test_run_tradingagents_debate_codex_backend_wraps_headless_failure(
                 results_dir=ROOT / "data" / "tradingagents" / "results",
                 cache_dir=ROOT / "data" / "tradingagents" / "cache",
                 memory_dir=ROOT / "data" / "tradingagents" / "memory",
+                source_dir=ROOT.parent / "TradingAgents",
                 allow_execution=False,
                 llm_backend="codex",
                 codex_model="gpt-5.4",
@@ -290,6 +354,7 @@ def test_decision_packet_sections_do_not_leak_execution_language() -> None:
             results_dir=ROOT / "data" / "tradingagents" / "results",
             cache_dir=ROOT / "data" / "tradingagents" / "cache",
             memory_dir=ROOT / "data" / "tradingagents" / "memory",
+            source_dir=ROOT.parent / "TradingAgents",
             allow_execution=False,
             llm_backend="api",
             codex_model="gpt-5.4",

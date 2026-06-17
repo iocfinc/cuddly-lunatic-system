@@ -12,11 +12,16 @@ import pathlib
 import pwd
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from typing import Any
 
-from quant_researcher_desk.moomoo_options_report import RISK_NOTE
+from quant_researcher_desk.execution_recovery import (
+    normalize_debate_backend_error,
+    normalize_options_report_error,
+)
+from quant_researcher_desk.moomoo_options_report import OptionsReportError, RISK_NOTE
 from quant_researcher_desk.options_research import (
     FixtureOptionsResearchProvider,
     OptionsResearchProvider,
@@ -26,6 +31,8 @@ from quant_researcher_desk.options_research import (
     format_money,
     format_pct,
 )
+
+TRADINGAGENTS_DEFAULT_ANALYSTS = ["market", "news", "fundamentals"]
 
 
 class TradingAgentsIntegrationError(Exception):
@@ -66,6 +73,7 @@ class TradingAgentsConfig:
     llm_backend: str
     codex_model: str
     codex_profile: str | None
+    source_dir: pathlib.Path | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +113,13 @@ def _repo_local_dir(root: pathlib.Path, *parts: str) -> pathlib.Path:
     return root.joinpath(*parts)
 
 
+def _default_tradingagents_source_dir(root: pathlib.Path) -> pathlib.Path | None:
+    sibling = root.parent / "TradingAgents"
+    if sibling.exists():
+        return sibling
+    return None
+
+
 def _real_user_home() -> pathlib.Path:
     return pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)
 
@@ -125,6 +140,7 @@ def load_tradingagents_config(
         results_dir=pathlib.Path(env_values.get("TRADINGAGENTS_RESULTS_DIR", _repo_local_dir(root, "data", "tradingagents", "results"))),
         cache_dir=pathlib.Path(env_values.get("TRADINGAGENTS_CACHE_DIR", _repo_local_dir(root, "data", "tradingagents", "cache"))),
         memory_dir=pathlib.Path(env_values.get("TRADINGAGENTS_MEMORY_DIR", _repo_local_dir(root, "data", "tradingagents", "memory"))),
+        source_dir=pathlib.Path(source_dir).expanduser() if (source_dir := env_values.get("TRADINGAGENTS_SOURCE_DIR")) else _default_tradingagents_source_dir(root),
         allow_execution=_env_flag(env_values.get("TRADINGAGENTS_ALLOW_EXECUTION"), default=False),
         llm_backend=env_values.get("TRADINGAGENTS_LLM_BACKEND", "api").strip().lower() or "api",
         codex_model=env_values.get("TRADINGAGENTS_CODEX_MODEL", "gpt-5.4"),
@@ -137,7 +153,10 @@ def build_desk_evidence_pack(
     request: OptionsResearchRequest,
     now: dt.datetime | None = None,
 ) -> DeskEvidencePack:
-    report = build_options_research_report(provider, request, now=now)
+    try:
+        report = build_options_research_report(provider, request, now=now)
+    except OptionsReportError as exc:
+        raise normalize_options_report_error(request.symbol, "evidence_pack", exc) from exc
     base_iv_rows = [
         {
             "price_shock_pct": row.price_shock_pct,
@@ -209,6 +228,7 @@ def _sanitize_research_text(text: str) -> str:
 
 def _required_llm_env_key(provider: str) -> str | None:
     return {
+        "abacus": "ABACUS_API_KEY",
         "openai": "OPENAI_API_KEY",
         "google": "GOOGLE_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
@@ -221,9 +241,16 @@ def _required_llm_env_key(provider: str) -> str | None:
     }.get(provider.lower())
 
 
+def _upstream_tradingagents_symbol(symbol: str) -> str:
+    text = symbol.strip().upper()
+    if text.startswith("US.") and len(text) > 3:
+        return text.split(".", 1)[1]
+    return symbol
+
+
 def _normalize_label(text: str, report: OptionsResearchReport) -> str:
     lowered = text.lower()
-    if any(token in lowered for token in ("strong buy", "buy", "long")):
+    if any(token in lowered for token in ("strong buy", "buy", "long", "candidate")):
         return "Research Candidate"
     if any(token in lowered for token in ("sell", "short", "avoid", "reject")):
         return "Reject"
@@ -402,13 +429,9 @@ def _api_backend_debate(
     packet_request: TradingAgentsPacketRequest,
     evidence_pack: DeskEvidencePack,
 ) -> AgentDebateResult:
-    required_key = _required_llm_env_key(config.llm_provider)
-    if required_key and not os.environ.get(required_key):
-        raise TradingAgentsIntegrationError(
-            f"TradingAgents requires {required_key} for llm_provider={config.llm_provider}."
-        )
-
     try:
+        if config.source_dir and str(config.source_dir) not in sys.path:
+            sys.path.insert(0, str(config.source_dir))
         from tradingagents.default_config import DEFAULT_CONFIG  # type: ignore[import-not-found]
         from tradingagents.graph.trading_graph import TradingAgentsGraph  # type: ignore[import-not-found]
     except ModuleNotFoundError as exc:
@@ -416,6 +439,12 @@ def _api_backend_debate(
             "TradingAgents dependency is not installed. Install the official TauricResearch/TradingAgents source "
             f"at ref {config.ref} and retry."
         ) from exc
+
+    required_key = _required_llm_env_key(config.llm_provider)
+    if required_key and not os.environ.get(required_key):
+        raise TradingAgentsIntegrationError(
+            f"TradingAgents requires {required_key} for llm_provider={config.llm_provider}."
+        )
 
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     config.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -430,9 +459,14 @@ def _api_backend_debate(
     tradingagents_config["deep_think_llm"] = tradingagents_config.get("deep_think_llm")
     tradingagents_config["quick_think_llm"] = tradingagents_config.get("quick_think_llm")
 
-    graph = TradingAgentsGraph(debug=False, config=tradingagents_config)
+    graph = TradingAgentsGraph(
+        selected_analysts=TRADINGAGENTS_DEFAULT_ANALYSTS,
+        debug=False,
+        config=tradingagents_config,
+    )
     analysis_date = packet_request.analysis_date or evidence_pack.generated_at.date().isoformat()
-    _, decision = graph.propagate(packet_request.symbol, analysis_date)
+    upstream_symbol = _upstream_tradingagents_symbol(packet_request.symbol)
+    _, decision = graph.propagate(upstream_symbol, analysis_date)
     raw_text = decision if isinstance(decision, str) else json.dumps(decision, sort_keys=True, default=str)
     safe_text = _sanitize_research_text(raw_text)
 
@@ -490,6 +524,18 @@ def run_tradingagents_debate(
             "TRADINGAGENTS_ALLOW_EXECUTION must remain false in naval-analyst. This integration is research-only."
         )
     return _run_live_tradingagents_debate(config, packet_request, evidence_pack)
+
+
+def run_tradingagents_debate_for_symbol(
+    config: TradingAgentsConfig,
+    packet_request: TradingAgentsPacketRequest,
+    evidence_pack: DeskEvidencePack,
+    fixture: bool = False,
+) -> AgentDebateResult:
+    try:
+        return run_tradingagents_debate(config, packet_request, evidence_pack, fixture=fixture)
+    except TradingAgentsIntegrationError as exc:
+        raise normalize_debate_backend_error(packet_request.symbol, "debate_backend", exc) from exc
 
 
 def build_decision_packet(

@@ -98,6 +98,9 @@ Tone:
 Structure:
 
 * Statement → Evidence → Interpretation → Risk
+* Verdict language must remain research-only. It can sound like a disciplined desk note, but it must not imply regulated financial advice, order placement, or a directive to buy or sell.
+* Every options verdict should cite at least one quantitative backing point, such as fair-value gap, IV/HV, liquidity, expiry, or catalyst context.
+* Risk caveats are part of the voice, not boilerplate. If context is missing, stale, or fixture-backed, the note should say so plainly.
 
 Example:
 

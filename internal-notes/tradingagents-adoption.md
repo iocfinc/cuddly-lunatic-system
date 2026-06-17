@@ -80,6 +80,12 @@ The debate step now supports two backend modes behind a repo-local decorator sea
 - `api`: use the upstream TradingAgents graph and its configured LLM provider
 - `codex`: use headless `codex exec` with a JSON schema contract, defaulting to `gpt-5.4`
 
+## Verified Closure
+
+As of 2026-06-17, the TradingAgents packet and watchlist backlog items are closed in Linear. The adapter remains fixture-first by default, with live runs gated behind explicit local enablement.
+
+Validation uses repo-local state and cache paths. The live-failure smoke path forces a closed OpenD port so a developer's local `.env` cannot accidentally depend on an active OpenD session during CI-style checks.
+
 ## Non-Goal
 
 This repository will not add broker connectivity, order submission, or automated execution as part of the TradingAgents adoption path.

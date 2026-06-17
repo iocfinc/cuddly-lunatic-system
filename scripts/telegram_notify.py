@@ -18,6 +18,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SECRET_KEYS = ("TOKEN", "KEY", "SECRET", "PASSWORD")
 PRIVATE_CHANNEL_PREFIX = "-100"
 MAX_EVENT_TEXT_LENGTH = 700
+MAX_TELEGRAM_CAPTION_LENGTH = 1024
+VALID_PARSE_MODES = {"", "HTML", "Markdown", "MarkdownV2"}
+VALID_PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
 
 
 class TelegramSendError(Exception):
@@ -60,6 +63,31 @@ def truncate_text(text: str, limit: int = MAX_EVENT_TEXT_LENGTH) -> str:
     if len(normalized) <= limit:
         return normalized
     return f"{normalized[: limit - 1].rstrip()}..."
+
+
+def validate_parse_mode(parse_mode: str) -> None:
+    if parse_mode not in VALID_PARSE_MODES:
+        allowed = ", ".join(sorted(mode or "none" for mode in VALID_PARSE_MODES))
+        raise TelegramSendError(f"Unsupported Telegram parse_mode: {parse_mode}. Expected one of: {allowed}")
+
+
+def validate_caption(caption: str) -> None:
+    if len(caption) > MAX_TELEGRAM_CAPTION_LENGTH:
+        raise TelegramSendError(
+            f"Telegram caption is too long: {len(caption)} characters; max is {MAX_TELEGRAM_CAPTION_LENGTH}."
+        )
+
+
+def validate_attachment_path(path: pathlib.Path, *, photo: bool = False) -> None:
+    if not path.is_file():
+        kind = "photo" if photo else "document"
+        raise TelegramSendError(f"Telegram {kind} does not exist: {path}")
+    if path.stat().st_size <= 0:
+        kind = "photo" if photo else "document"
+        raise TelegramSendError(f"Telegram {kind} is empty: {path}")
+    if photo and path.suffix.lower() not in VALID_PHOTO_SUFFIXES:
+        allowed = ", ".join(sorted(VALID_PHOTO_SUFFIXES))
+        raise TelegramSendError(f"Telegram photo has unsupported file type: {path.suffix or '<none>'}. Expected one of: {allowed}.")
 
 
 def html_line(label: str, value: object) -> str:
@@ -150,6 +178,7 @@ def chat_id_hint(chat_id: str) -> str:
 
 
 def post_telegram(token: str, chat_id: str, message: str, parse_mode: str = "") -> None:
+    validate_parse_mode(parse_mode)
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": message}
     if parse_mode:
@@ -221,8 +250,9 @@ def post_telegram_document(
     parse_mode: str = "",
 ) -> None:
     path = pathlib.Path(document_path)
-    if not path.is_file():
-        raise TelegramSendError(f"Telegram document does not exist: {path}")
+    validate_parse_mode(parse_mode)
+    validate_caption(caption)
+    validate_attachment_path(path)
 
     url = f"https://api.telegram.org/bot{token}/sendDocument"
     fields = {"chat_id": chat_id}
@@ -252,8 +282,9 @@ def post_telegram_photo(
     parse_mode: str = "",
 ) -> None:
     path = pathlib.Path(photo_path)
-    if not path.is_file():
-        raise TelegramSendError(f"Telegram photo does not exist: {path}")
+    validate_parse_mode(parse_mode)
+    validate_caption(caption)
+    validate_attachment_path(path, photo=True)
 
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
     fields = {"chat_id": chat_id}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import csv
 import pathlib
 import sys
 
@@ -12,12 +13,21 @@ sys.path.insert(0, str(ROOT / "src"))
 from quant_researcher_desk.sector_tree import (  # noqa: E402
     CompanyProfile,
     FixtureSectorTreeProvider,
+    IndustryUniverseSectorTreeProvider,
     SectorTreeError,
     SectorTreeRequest,
     ValueChainEdge,
+    _FIXTURE_PROFILES,
     build_sector_tree_report,
 )
-from quant_researcher_desk.sector_rotation import DEFAULT_SECTOR_ROTATION, select_sector_rotation_entry  # noqa: E402
+from quant_researcher_desk.industry_universe import PlateRecord, build_domain_edges, build_industry_nodes  # noqa: E402
+from quant_researcher_desk.sector_rotation import (  # noqa: E402
+    DEFAULT_SECTOR_ROTATION,
+    SectorRotationState,
+    save_sector_rotation_state,
+    select_rotation_entry_for_dispatch,
+    select_sector_rotation_entry,
+)
 
 
 def test_build_sector_tree_report_groups_us_semiconductor_fixture() -> None:
@@ -40,7 +50,7 @@ def test_hk_fixture_includes_required_report_copy() -> None:
     assert "Sector Tree TLDR: HK Internet Platforms" in report.telegram_tldr
     assert "Main risk: HK.0981: Technology access constraints can affect node progression." in report.telegram_tldr
     assert "Educational research only, not a trading instruction." in report.telegram_tldr
-    assert "compact value-chain field note across 4 companies" in report.marketing_copy
+    assert "compact sector field note across 4 coverage nodes" in report.marketing_copy
 
 
 def test_hk_tech_fixture_matches_requested_sector() -> None:
@@ -56,6 +66,8 @@ def test_hk_tech_fixture_matches_requested_sector() -> None:
 def test_rotation_entries_are_all_backed_by_sector_fixtures() -> None:
     markets = {entry.market for entry in DEFAULT_SECTOR_ROTATION}
     assert {"HK", "US"} <= markets
+    rotation_keys = {(entry.market, entry.sector) for entry in DEFAULT_SECTOR_ROTATION}
+    assert rotation_keys == set(_FIXTURE_PROFILES)
 
     for entry in DEFAULT_SECTOR_ROTATION:
         report = build_sector_tree_report(SectorTreeRequest(market=entry.market, sector=entry.sector))
@@ -65,8 +77,62 @@ def test_rotation_entries_are_all_backed_by_sector_fixtures() -> None:
 
 
 def test_select_sector_rotation_entry_is_date_deterministic() -> None:
-    entry = select_sector_rotation_entry(current_date=dt.date(2026, 4, 29))
+    entry = select_sector_rotation_entry(current_time=dt.date(2026, 4, 29))
     assert entry in DEFAULT_SECTOR_ROTATION
+
+
+def test_select_sector_rotation_entry_advances_with_cadence_bucket() -> None:
+    first = select_sector_rotation_entry(
+        current_time=dt.datetime(2026, 4, 29, 8, 0),
+        cadence_minutes=180,
+    )
+    second = select_sector_rotation_entry(
+        current_time=dt.datetime(2026, 4, 29, 11, 0),
+        cadence_minutes=180,
+    )
+
+    assert first in DEFAULT_SECTOR_ROTATION
+    assert second in DEFAULT_SECTOR_ROTATION
+    assert second != first
+
+
+def test_select_rotation_entry_for_dispatch_skips_same_cadence_bucket(tmp_path: pathlib.Path) -> None:
+    current_time = dt.datetime(2026, 4, 29, 8, 0)
+    state_path = tmp_path / "sector-update.json"
+
+    first, skipped_first = select_rotation_entry_for_dispatch(
+        current_time=current_time,
+        cadence_minutes=180,
+        state_path=state_path,
+    )
+    assert skipped_first is False
+    save_sector_rotation_state(
+        state_path,
+        SectorRotationState(
+            sent_at_epoch=int(current_time.replace(second=0, microsecond=0).timestamp()),
+            market=first.market,
+            sector=first.sector,
+            cadence_minutes=180,
+        ),
+    )
+
+    second, skipped_second = select_rotation_entry_for_dispatch(
+        current_time=current_time + dt.timedelta(minutes=12),
+        cadence_minutes=180,
+        state_path=state_path,
+    )
+
+    assert second == first
+    assert skipped_second is True
+
+    third, skipped_third = select_rotation_entry_for_dispatch(
+        current_time=current_time + dt.timedelta(minutes=181),
+        cadence_minutes=180,
+        state_path=state_path,
+    )
+
+    assert third in DEFAULT_SECTOR_ROTATION
+    assert skipped_third is False
 
 
 def test_focus_symbols_filters_profiles_and_edges_deterministically() -> None:
@@ -148,6 +214,37 @@ def test_custom_provider_can_supply_profiles_and_edges() -> None:
     assert [profile.symbol for profile in report.downstream] == ["APP"]
     assert report.edges[0].relationship == "developer data platform supports application workflows"
     assert "DB->APP: Infrastructure outages can affect application reliability." in report.risks
+
+
+def test_industry_universe_provider_uses_gics_industry_group_scope(tmp_path: pathlib.Path) -> None:
+    nodes = build_industry_nodes(
+        (
+            PlateRecord("US", "INDUSTRY", "US.SEMI", "Semiconductors"),
+            PlateRecord("US", "INDUSTRY", "US.EQPT", "Semiconductor Equipment & Materials"),
+            PlateRecord("US", "INDUSTRY", "US.SOFT", "Software - Application"),
+        )
+    )
+    edges = build_domain_edges(nodes)
+    nodes_path = tmp_path / "nodes.csv"
+    edges_path = tmp_path / "edges.csv"
+    with nodes_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(nodes[0].__dict__))
+        writer.writeheader()
+        writer.writerows(node.__dict__ for node in nodes)
+    with edges_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["source_id", "target_id", "relationship", "rationale"])
+        writer.writeheader()
+        writer.writerows(edge.__dict__ for edge in edges)
+
+    provider = IndustryUniverseSectorTreeProvider(nodes_path, edges_path)
+    report = build_sector_tree_report(SectorTreeRequest(market="US", sector="Semiconductors"), provider)
+
+    assert report.analysis_level == "GICS industry group"
+    assert report.gics_sector == "Information Technology"
+    assert report.gics_industry_group == "Semiconductors & Semiconductor Equipment"
+    assert report.drill_down_industries == ("Semiconductors & Semiconductor Equipment",)
+    assert [profile.symbol for profile in report.midstream] == ["US.EQPT", "US.SEMI"]
+    assert "Analysis level: GICS industry group" in report.telegram_tldr
 
 
 def test_unknown_fixture_raises_clear_error() -> None:

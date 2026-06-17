@@ -3,7 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Protocol
+
+from quant_researcher_desk.industry_universe import (
+    IndustryNode,
+    SupplyChainEdge as IndustrySupplyChainEdge,
+    load_industry_nodes_csv,
+    load_supply_chain_edges_csv,
+)
 
 
 VALUE_CHAIN_ROLES = ("upstream", "midstream", "downstream")
@@ -31,6 +39,9 @@ class CompanyProfile:
     value_chain_role: str
     business_summary: str
     key_risks: tuple[str, ...] = ()
+    gics_sector: str = ""
+    gics_industry_group: str = ""
+    gics_industry: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,6 +72,10 @@ class SectorTreeReport:
     educational_summary: str
     telegram_tldr: str
     marketing_copy: str
+    analysis_level: str = "sector"
+    gics_sector: str = ""
+    gics_industry_group: str = ""
+    drill_down_industries: tuple[str, ...] = ()
 
 
 class FixtureSectorTreeProvider:
@@ -79,6 +94,68 @@ class FixtureSectorTreeProvider:
 
     def get_value_chain_edges(self, market: str, sector: str) -> list[ValueChainEdge]:
         return list(self._edges.get(_fixture_key(market, sector), ()))
+
+
+class IndustryUniverseSectorTreeProvider:
+    """Build GICS industry-group reports from the exported Moomoo universe."""
+
+    def __init__(self, nodes_path: str | Path, edges_path: str | Path) -> None:
+        self._nodes = load_industry_nodes_csv(nodes_path)
+        self._edges = load_supply_chain_edges_csv(edges_path)
+
+    def get_company_profiles(self, market: str, sector: str) -> list[CompanyProfile]:
+        return [_node_to_profile(node, sector) for node in self._select_nodes(market, sector)]
+
+    def get_value_chain_edges(self, market: str, sector: str) -> list[ValueChainEdge]:
+        selected = self._select_nodes(market, sector)
+        selected_ids = {node.node_id for node in selected}
+        selected_codes = {node.node_id: node.code for node in selected}
+        return [
+            _industry_edge_to_value_chain_edge(edge, selected_codes)
+            for edge in self._edges
+            if edge.source_id in selected_ids and edge.target_id in selected_ids
+        ]
+
+    def _select_nodes(self, market: str, sector: str) -> tuple[IndustryNode, ...]:
+        market = market.strip().upper()
+        sector_key = " ".join(sector.strip().lower().split())
+        exact = [
+            node
+            for node in self._nodes
+            if node.market == market
+            and node.plate_type == "INDUSTRY"
+            and (
+                _normalize_label(node.name) == sector_key
+                or node.code.lower() == sector_key
+                or _normalize_label(node.gics_industry_group) == sector_key
+                or _normalize_label(node.gics_industry) == sector_key
+            )
+        ]
+        if not exact:
+            return ()
+        target = exact[0]
+        scope_nodes = [
+            node
+            for node in self._nodes
+            if node.market == market
+            and node.gics_industry_group == target.gics_industry_group
+            and node.plate_type == "INDUSTRY"
+            and node.value_chain_role in {*VALUE_CHAIN_ROLES, "enabler", "cross_chain"}
+        ]
+        selected: list[IndustryNode] = []
+        for role in VALUE_CHAIN_ROLES:
+            role_nodes = sorted(
+                (node for node in scope_nodes if node.value_chain_role == role),
+                key=lambda node: (node.gics_industry, node.research_priority, node.name),
+            )
+            if target.value_chain_role == role and target not in role_nodes:
+                role_nodes.insert(0, target)
+            selected.extend(role_nodes[:4])
+        if not selected:
+            selected.extend(sorted(scope_nodes, key=lambda node: (node.gics_industry, node.research_priority, node.name))[:8])
+        if target not in selected:
+            selected.append(target)
+        return tuple(dict.fromkeys(selected))
 
 
 def build_sector_tree_report(
@@ -110,9 +187,11 @@ def build_sector_tree_report(
         )
     )
     risks = _build_risks(visible_profiles, selected_edges)
-    educational_summary = _build_educational_summary(normalized_request, grouped, selected_edges)
-    telegram_tldr = _build_telegram_tldr(normalized_request, grouped, risks)
-    marketing_copy = _build_marketing_copy(normalized_request, grouped)
+    gics_sector, gics_industry_group, drill_down_industries = _summarize_gics(visible_profiles)
+    analysis_level = "GICS industry group" if gics_industry_group else "sector"
+    educational_summary = _build_educational_summary(normalized_request, grouped, selected_edges, analysis_level, gics_sector, gics_industry_group, drill_down_industries)
+    telegram_tldr = _build_telegram_tldr(normalized_request, grouped, risks, analysis_level, gics_industry_group)
+    marketing_copy = _build_marketing_copy(normalized_request, grouped, analysis_level, gics_industry_group)
 
     return SectorTreeReport(
         request=normalized_request,
@@ -124,12 +203,52 @@ def build_sector_tree_report(
         educational_summary=educational_summary,
         telegram_tldr=telegram_tldr,
         marketing_copy=marketing_copy,
+        analysis_level=analysis_level,
+        gics_sector=gics_sector,
+        gics_industry_group=gics_industry_group,
+        drill_down_industries=drill_down_industries,
+    )
+
+
+def _node_to_profile(node: IndustryNode, requested_sector: str) -> CompanyProfile:
+    value_chain_role = node.value_chain_role if node.value_chain_role in VALUE_CHAIN_ROLES else "midstream"
+    return CompanyProfile(
+        symbol=node.code,
+        name=node.name,
+        market=node.market,
+        sector=node.gics_sector,
+        industry=node.gics_industry,
+        value_chain_role=value_chain_role,
+        business_summary=(
+            f"{node.name} is a Moomoo {node.plate_type.lower()} plate used as a drill-down industry under "
+            f"the {node.gics_industry_group} GICS industry group; locally it sits in the "
+            f"{node.value_chain_role} research layer."
+        ),
+        key_risks=(
+            "GICS overlay and plate-level role are research starting points; validate constituents and company filings before using them as evidence.",
+        ),
+        gics_sector=node.gics_sector,
+        gics_industry_group=node.gics_industry_group,
+        gics_industry=node.gics_industry,
+    )
+
+
+def _industry_edge_to_value_chain_edge(
+    edge: IndustrySupplyChainEdge,
+    selected_codes: dict[str, str],
+) -> ValueChainEdge:
+    return ValueChainEdge(
+        source_symbol=selected_codes[edge.source_id],
+        target_symbol=selected_codes[edge.target_id],
+        relationship=edge.relationship,
+        evidence=edge.rationale,
+        risk_note="This edge is heuristic until replaced with sourced company-level evidence.",
     )
 
 
 def _normalize_request(request: SectorTreeRequest) -> SectorTreeRequest:
     market = request.market.strip().upper()
-    sector = " ".join(request.sector.strip().lower().split())
+    sector = _normalize_label(request.sector)
     focus_symbols = tuple(sorted({symbol.strip().upper() for symbol in request.focus_symbols if symbol.strip()}))
     if not market:
         raise SectorTreeError("Market is required.")
@@ -177,6 +296,9 @@ def _normalize_profile(profile: CompanyProfile) -> CompanyProfile:
         value_chain_role=role,
         business_summary=profile.business_summary.strip(),
         key_risks=tuple(risk.strip() for risk in profile.key_risks if risk.strip()),
+        gics_sector=profile.gics_sector.strip(),
+        gics_industry_group=profile.gics_industry_group.strip(),
+        gics_industry=profile.gics_industry.strip(),
     )
 
 
@@ -211,11 +333,18 @@ def _build_educational_summary(
     request: SectorTreeRequest,
     grouped: dict[str, tuple[CompanyProfile, ...]],
     edges: tuple[ValueChainEdge, ...],
+    analysis_level: str,
+    gics_sector: str,
+    gics_industry_group: str,
+    drill_down_industries: tuple[str, ...],
 ) -> str:
     total = sum(len(grouped[role]) for role in VALUE_CHAIN_ROLES)
+    scope = gics_industry_group or request.sector.title()
+    drill_down = ", ".join(drill_down_industries) if drill_down_industries else "available company and industry rows"
     sections = [
-        f"The {request.market} {request.sector.title()} map is best read as a value-chain briefing, not a ticker list.",
-        f"Across {total} companies, the structure separates supply constraints, platform economics, and end-market demand.",
+        f"The {request.market} {scope} map is best read as a {analysis_level} value-chain briefing, not a ticker list.",
+        f"GICS sector context: {gics_sector or 'local fixture coverage'}; drill-down industries: {drill_down}.",
+        f"Across {total} coverage nodes, the structure separates supply constraints, platform economics, and end-market demand.",
         f"Upstream exposure sits with {_format_symbols(grouped['upstream'])}.",
         f"Midstream platforms include {_format_symbols(grouped['midstream'])}.",
         f"Downstream demand is represented by {_format_symbols(grouped['downstream'])}.",
@@ -234,10 +363,14 @@ def _build_telegram_tldr(
     request: SectorTreeRequest,
     grouped: dict[str, tuple[CompanyProfile, ...]],
     risks: tuple[str, ...],
+    analysis_level: str,
+    gics_industry_group: str,
 ) -> str:
+    scope = gics_industry_group or request.sector.title()
     return "\n".join(
         [
-            f"Sector Tree TLDR: {request.market} {request.sector.title()}",
+            f"Sector Tree TLDR: {request.market} {scope}",
+            f"Analysis level: {analysis_level}",
             f"Upstream: {_format_symbols(grouped['upstream'])}",
             f"Midstream: {_format_symbols(grouped['midstream'])}",
             f"Downstream: {_format_symbols(grouped['downstream'])}",
@@ -250,11 +383,14 @@ def _build_telegram_tldr(
 def _build_marketing_copy(
     request: SectorTreeRequest,
     grouped: dict[str, tuple[CompanyProfile, ...]],
+    analysis_level: str,
+    gics_industry_group: str,
 ) -> str:
     total = sum(len(grouped[role]) for role in VALUE_CHAIN_ROLES)
+    scope = gics_industry_group or request.sector.title()
     return (
-        f"Quant Researcher Desk turns {request.market} {request.sector.title()} coverage into a compact "
-        f"value-chain field note across {total} companies. The goal is to help readers see who supplies the stack, "
+        f"Quant Researcher Desk turns {request.market} {scope} coverage into a compact "
+        f"{analysis_level} field note across {total} coverage nodes. The goal is to help readers see who supplies the stack, "
         "who controls the platform layer, and where demand or regulation can change the earnings path."
     )
 
@@ -266,7 +402,22 @@ def _format_symbols(profiles: tuple[CompanyProfile, ...]) -> str:
 
 
 def _fixture_key(market: str, sector: str) -> tuple[str, str]:
-    return market.strip().upper(), " ".join(sector.strip().lower().split())
+    return market.strip().upper(), _normalize_label(sector)
+
+
+def _normalize_label(value: str) -> str:
+    return " ".join(value.strip().lower().split())
+
+
+def _summarize_gics(profiles: tuple[CompanyProfile, ...]) -> tuple[str, str, tuple[str, ...]]:
+    sectors = tuple(dict.fromkeys(profile.gics_sector for profile in profiles if profile.gics_sector))
+    groups = tuple(dict.fromkeys(profile.gics_industry_group for profile in profiles if profile.gics_industry_group))
+    industries = tuple(sorted({profile.gics_industry for profile in profiles if profile.gics_industry}))
+    return (
+        sectors[0] if len(sectors) == 1 else "",
+        groups[0] if len(groups) == 1 else "",
+        industries,
+    )
 
 
 _FIXTURE_PROFILES: dict[tuple[str, str], tuple[CompanyProfile, ...]] = {

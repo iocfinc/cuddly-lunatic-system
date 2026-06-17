@@ -26,11 +26,19 @@ snapshots/
 .com.moomoo.OpenD/
 
 # Local agentic-stack runtime state
+.cache/
+.codex/
 .agent/
 .agents/
 .agentic/
 agentic-stack/
 agentic-stack.log
+.npm/
+.playwright-mcp/
+.symphony-workspaces/
+.tradingagents/
+.understand-anything/
+Library/
 
 # OS/editor noise
 .DS_Store
