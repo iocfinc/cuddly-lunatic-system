@@ -12,6 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
+from quant_researcher_desk.catalyst_options_screen import FixtureCatalystOptionsProvider  # noqa: E402
 from quant_researcher_desk.moomoo_options_report import (  # noqa: E402
     MoomooOpenDQuoteClient,
     OptionsReportError,
@@ -35,13 +36,19 @@ def main() -> int:
     parser.add_argument("--symbol", default=env.get("MOOMOO_DEFAULT_SYMBOL", "US.TSM"))
     parser.add_argument("--expiry", default=None, help="Expiry date in YYYY-MM-DD format. Defaults to nearest future expiry.")
     parser.add_argument("--rows", type=int, default=5, help="Number of calls and puts to include.")
+    parser.add_argument("--fixture", action="store_true", help="Use deterministic fixture data instead of live OpenD.")
+    parser.add_argument("--skip-telegram", action="store_true", help="Skip Telegram posting even when local env enables it.")
     parser.add_argument("--opend-host", default=env.get("MOOMOO_OPEND_HOST", "127.0.0.1"))
     parser.add_argument("--opend-port", type=int, default=int(env.get("MOOMOO_OPEND_PORT", "11111")))
     args = parser.parse_args()
 
     try:
-        with MoomooOpenDQuoteClient(host=args.opend_host, port=args.opend_port) as client:
+        if args.fixture:
+            client = FixtureCatalystOptionsProvider()
             report = build_options_report(client, symbol=args.symbol, expiry=args.expiry, rows=args.rows)
+        else:
+            with MoomooOpenDQuoteClient(host=args.opend_host, port=args.opend_port) as client:
+                report = build_options_report(client, symbol=args.symbol, expiry=args.expiry, rows=args.rows)
     except OptionsReportError as exc:
         print(f"moomoo options report failed: {exc}", file=sys.stderr)
         return 1
@@ -54,8 +61,13 @@ def main() -> int:
         print(message)
         return 0
 
-    if env.get("TELEGRAM_NOTIFY_ENABLED", "false").lower() != "true":
-        print("telegram notification skipped: TELEGRAM_NOTIFY_ENABLED is not true")
+    if args.skip_telegram or env.get("TELEGRAM_NOTIFY_ENABLED", "false").lower() != "true":
+        message = (
+            "telegram notification skipped: --skip-telegram was set"
+            if args.skip_telegram
+            else "telegram notification skipped: TELEGRAM_NOTIFY_ENABLED is not true"
+        )
+        print(message)
         return 0
     token = env.get("TELEGRAM_BOT_TOKEN", "")
     chat_id = env.get("TELEGRAM_CHAT_ID", "")

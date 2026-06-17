@@ -114,7 +114,10 @@ def _repo_local_dir(root: pathlib.Path, *parts: str) -> pathlib.Path:
 
 
 def _default_tradingagents_source_dir(root: pathlib.Path) -> pathlib.Path | None:
-    return root.parent / "TradingAgents"
+    sibling = root.parent / "TradingAgents"
+    if sibling.exists():
+        return sibling
+    return None
 
 
 def _real_user_home() -> pathlib.Path:
@@ -426,12 +429,6 @@ def _api_backend_debate(
     packet_request: TradingAgentsPacketRequest,
     evidence_pack: DeskEvidencePack,
 ) -> AgentDebateResult:
-    required_key = _required_llm_env_key(config.llm_provider)
-    if required_key and not os.environ.get(required_key):
-        raise TradingAgentsIntegrationError(
-            f"TradingAgents requires {required_key} for llm_provider={config.llm_provider}."
-        )
-
     try:
         if config.source_dir and str(config.source_dir) not in sys.path:
             sys.path.insert(0, str(config.source_dir))
@@ -442,6 +439,12 @@ def _api_backend_debate(
             "TradingAgents dependency is not installed. Install the official TauricResearch/TradingAgents source "
             f"at ref {config.ref} and retry."
         ) from exc
+
+    required_key = _required_llm_env_key(config.llm_provider)
+    if required_key and not os.environ.get(required_key):
+        raise TradingAgentsIntegrationError(
+            f"TradingAgents requires {required_key} for llm_provider={config.llm_provider}."
+        )
 
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     config.memory_dir.mkdir(parents=True, exist_ok=True)

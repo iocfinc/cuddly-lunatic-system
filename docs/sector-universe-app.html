@@ -1,0 +1,866 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sector Universe Explorer</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root {
+      --bg: #1a1a1a;
+      --panel: #22211f;
+      --panel-2: #181817;
+      --line: rgba(255, 255, 255, 0.12);
+      --line-strong: rgba(255, 255, 255, 0.22);
+      --text: #f4f1eb;
+      --muted: #a8a29a;
+      --muted-2: #77716a;
+      --accent: #ff4632;
+      --accent-soft: rgba(255, 70, 50, 0.18);
+      --amber: #fedc2a;
+      --mono: "JetBrains Mono", "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+      --sans: "Geist", "Satoshi", "Avenir Next", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color-scheme: dark;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,0.018), transparent 38rem),
+        var(--bg);
+      color: var(--text);
+      font-family: var(--sans);
+      letter-spacing: 0;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.16;
+      background-image:
+        linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.035) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: linear-gradient(to bottom, black, transparent 78%);
+    }
+
+    button,
+    select {
+      font: inherit;
+    }
+
+    .shell {
+      width: min(1480px, calc(100vw - 48px));
+      margin: 0 auto;
+      padding: 28px 0 48px;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: end;
+      padding-bottom: 24px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .title-block {
+      max-width: 780px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2.25rem, 4.2vw, 4.9rem);
+      line-height: 0.94;
+      font-weight: 680;
+      letter-spacing: -0.045em;
+    }
+
+    .dek {
+      max-width: 66ch;
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 1rem;
+      line-height: 1.6;
+    }
+
+    .source-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      justify-content: flex-end;
+      align-items: center;
+    }
+
+    .source-chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      border: 1px solid var(--line);
+      padding: 0 12px;
+      color: var(--muted);
+      text-decoration: none;
+      font: 0.75rem/1 var(--mono);
+      text-transform: uppercase;
+      transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1), border-color 180ms, color 180ms;
+    }
+
+    .source-chip:hover {
+      border-color: var(--line-strong);
+      color: var(--text);
+      transform: translateY(-1px);
+    }
+
+    .source-chip:active {
+      transform: translateY(1px);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+      gap: 28px;
+      padding-top: 28px;
+      align-items: start;
+    }
+
+    .control-rail {
+      position: sticky;
+      top: 18px;
+      display: grid;
+      gap: 24px;
+    }
+
+    .filter-group,
+    .readout,
+    .detail-panel {
+      border-top: 1px solid var(--line);
+      padding-top: 18px;
+    }
+
+    .field {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 18px;
+    }
+
+    label,
+    .section-label {
+      color: var(--muted-2);
+      font: 0.72rem/1 var(--mono);
+      text-transform: uppercase;
+    }
+
+    select {
+      width: 100%;
+      min-height: 46px;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 0 12px;
+      outline: none;
+      transition: border-color 180ms cubic-bezier(0.16, 1, 0.3, 1), transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    select:focus {
+      border-color: rgba(255, 70, 50, 0.7);
+    }
+
+    select:active {
+      transform: translateY(1px);
+    }
+
+    .metric-stack {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-top: 1px solid var(--line);
+      border-left: 1px solid var(--line);
+    }
+
+    .metric {
+      min-height: 96px;
+      padding: 14px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .metric strong {
+      display: block;
+      font: 1.8rem/1 var(--mono);
+      font-weight: 560;
+      color: var(--text);
+    }
+
+    .metric span {
+      display: block;
+      margin-top: 10px;
+      color: var(--muted-2);
+      font: 0.7rem/1.25 var(--mono);
+      text-transform: uppercase;
+    }
+
+    .role-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .role-item {
+      display: grid;
+      grid-template-columns: 86px 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.86rem;
+    }
+
+    .role-item b {
+      color: var(--text);
+      font: 0.7rem/1 var(--mono);
+      text-transform: uppercase;
+    }
+
+    .role-item code {
+      color: var(--accent);
+      font-family: var(--mono);
+    }
+
+    .visual-stage {
+      min-width: 0;
+    }
+
+    .stage-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 24px;
+      align-items: start;
+      margin-bottom: 22px;
+    }
+
+    .stage-title {
+      margin: 0;
+      font-size: clamp(1.65rem, 2.5vw, 3.1rem);
+      line-height: 1;
+      letter-spacing: -0.035em;
+      font-weight: 650;
+    }
+
+    .stage-copy {
+      margin: 10px 0 0;
+      max-width: 72ch;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .status-dot {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      white-space: nowrap;
+      color: var(--muted);
+      font: 0.72rem/1 var(--mono);
+      text-transform: uppercase;
+    }
+
+    .status-dot::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 0 0 rgba(255, 70, 50, 0.4);
+      animation: breathe 2.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    }
+
+    @keyframes breathe {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255, 70, 50, 0.34); opacity: 0.8; }
+      50% { box-shadow: 0 0 0 8px rgba(255, 70, 50, 0); opacity: 1; }
+    }
+
+    .map-wrap {
+      position: relative;
+      min-height: 560px;
+      overflow: hidden;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      background:
+        radial-gradient(circle at 12% 20%, rgba(255, 70, 50, 0.13), transparent 24rem),
+        linear-gradient(90deg, rgba(255,255,255,0.025), transparent);
+    }
+
+    svg {
+      display: block;
+      width: 100%;
+      min-height: 560px;
+    }
+
+    .edge {
+      stroke: rgba(254, 220, 42, 0.42);
+      stroke-width: 1.25;
+      fill: none;
+    }
+
+    .node text {
+      pointer-events: none;
+    }
+
+    .node-shell {
+      fill: rgba(255, 255, 255, 0.045);
+      stroke: rgba(255, 255, 255, 0.17);
+      stroke-width: 1;
+      transition: fill 180ms cubic-bezier(0.16, 1, 0.3, 1), stroke 180ms cubic-bezier(0.16, 1, 0.3, 1), transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .node.is-selected .node-shell {
+      fill: var(--accent-soft);
+      stroke: rgba(255, 70, 50, 0.76);
+    }
+
+    .node:hover .node-shell {
+      fill: rgba(255, 255, 255, 0.075);
+      stroke: rgba(255, 255, 255, 0.32);
+      transform: translateY(-2px);
+    }
+
+    .node-label {
+      fill: var(--text);
+      font: 600 12px var(--sans);
+    }
+
+    .node-meta {
+      fill: var(--muted-2);
+      font: 10px var(--mono);
+      text-transform: uppercase;
+    }
+
+    .column-label {
+      fill: var(--muted-2);
+      font: 11px var(--mono);
+      text-transform: uppercase;
+    }
+
+    .empty-state {
+      display: none;
+      min-height: 420px;
+      place-items: center;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      text-align: center;
+      padding: 40px;
+    }
+
+    .empty-state.is-visible {
+      display: grid;
+    }
+
+    .detail-panel {
+      margin-top: 24px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+      gap: 24px;
+    }
+
+    .detail-title {
+      margin: 8px 0 0;
+      font-size: clamp(1.3rem, 2vw, 2rem);
+      line-height: 1.1;
+      letter-spacing: -0.025em;
+    }
+
+    .detail-copy {
+      color: var(--muted);
+      line-height: 1.65;
+      margin: 12px 0 0;
+    }
+
+    .edge-list {
+      display: grid;
+      gap: 10px;
+      max-height: 260px;
+      overflow: auto;
+      padding-right: 6px;
+    }
+
+    .edge-row {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+      color: var(--muted);
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
+
+    .edge-row code {
+      display: block;
+      color: var(--text);
+      font-family: var(--mono);
+      margin-bottom: 5px;
+    }
+
+    .loading {
+      min-height: 460px;
+      display: grid;
+      gap: 16px;
+      align-content: center;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .skeleton {
+      height: 18px;
+      width: min(520px, 80%);
+      background: linear-gradient(90deg, rgba(255,255,255,0.05), rgba(255,255,255,0.12), rgba(255,255,255,0.05));
+      background-size: 200% 100%;
+      animation: shimmer 1.7s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+    }
+
+    .skeleton:nth-child(2) { width: 66%; }
+    .skeleton:nth-child(3) { width: 42%; }
+
+    @keyframes shimmer {
+      from { background-position: 100% 0; }
+      to { background-position: -100% 0; }
+    }
+
+    @media (max-width: 920px) {
+      .shell {
+        width: min(100vw - 28px, 720px);
+        padding-top: 20px;
+      }
+
+      .topbar,
+      .workspace,
+      .stage-header,
+      .detail-panel {
+        grid-template-columns: 1fr;
+      }
+
+      .source-row {
+        justify-content: flex-start;
+      }
+
+      .control-rail {
+        position: static;
+      }
+
+      .map-wrap,
+      svg {
+        min-height: 620px;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="title-block">
+        <h1>Sector Universe Explorer</h1>
+        <p class="dek">A visual working map of HK and US Moomoo plates, organized for supply-chain research. Select a market and industry to inspect the adjacent upstream, midstream, downstream, and enabling layers.</p>
+      </div>
+      <nav class="source-row" aria-label="Reference files">
+        <a class="source-chip" href="./sector-industry-universe.md">Research doc</a>
+        <a class="source-chip" href="../data/sector-universe/value_chain_nodes.csv">Nodes CSV</a>
+        <a class="source-chip" href="../data/sector-universe/value_chain_edges.csv">Edges CSV</a>
+      </nav>
+    </header>
+
+    <section class="workspace">
+      <aside class="control-rail" aria-label="Sector controls">
+        <div class="filter-group">
+          <div class="field">
+            <label for="marketSelect">Market</label>
+            <select id="marketSelect" aria-label="Market"></select>
+          </div>
+          <div class="field">
+            <label for="industrySelect">Industry</label>
+            <select id="industrySelect" aria-label="Industry"></select>
+          </div>
+        </div>
+
+        <div class="readout">
+          <div class="section-label">Current slice</div>
+          <div class="metric-stack" id="metricStack" aria-live="polite"></div>
+        </div>
+
+        <div class="readout">
+          <div class="section-label">Role mix</div>
+          <div class="role-list" id="roleList"></div>
+        </div>
+      </aside>
+
+      <section class="visual-stage" aria-label="Visual sector map">
+        <div class="stage-header">
+          <div>
+            <h2 class="stage-title" id="stageTitle">Loading sector universe</h2>
+            <p class="stage-copy" id="stageCopy">Reading the local Moomoo taxonomy export.</p>
+          </div>
+          <div class="status-dot" id="statusDot">Loading</div>
+        </div>
+
+        <div class="loading" id="loadingState" aria-hidden="false">
+          <div class="skeleton"></div>
+          <div class="skeleton"></div>
+          <div class="skeleton"></div>
+        </div>
+
+        <div class="map-wrap" id="mapWrap" hidden>
+          <svg id="network" role="img" aria-labelledby="stageTitle stageCopy"></svg>
+        </div>
+
+        <div class="empty-state" id="emptyState">
+          <div>
+            <h3>No adjacent map yet</h3>
+            <p>This industry exists in the source taxonomy, but the current graph rules do not have neighboring layers for it.</p>
+          </div>
+        </div>
+
+        <div class="detail-panel">
+          <div>
+            <div class="section-label">Selected plate</div>
+            <h3 class="detail-title" id="detailTitle">Waiting for data</h3>
+            <p class="detail-copy" id="detailCopy">Once loaded, the selected industry will be shown with nearby plates from the same market and domain.</p>
+          </div>
+          <div>
+            <div class="section-label">Relationship evidence queue</div>
+            <div class="edge-list" id="edgeList"></div>
+          </div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script>
+    const NODE_PATH = "../data/sector-universe/value_chain_nodes.csv";
+    const EDGE_PATH = "../data/sector-universe/value_chain_edges.csv";
+    const roles = ["upstream", "midstream", "downstream", "enabler", "cross_chain"];
+    const roleLabels = {
+      upstream: "Upstream",
+      midstream: "Midstream",
+      downstream: "Downstream",
+      enabler: "Enabler",
+      cross_chain: "Cross-chain"
+    };
+
+    const state = {
+      nodes: [],
+      edges: [],
+      market: "HK",
+      industryCode: "",
+      selectedNodeId: ""
+    };
+
+    const els = {
+      market: document.getElementById("marketSelect"),
+      industry: document.getElementById("industrySelect"),
+      metrics: document.getElementById("metricStack"),
+      roleList: document.getElementById("roleList"),
+      title: document.getElementById("stageTitle"),
+      copy: document.getElementById("stageCopy"),
+      status: document.getElementById("statusDot"),
+      loading: document.getElementById("loadingState"),
+      mapWrap: document.getElementById("mapWrap"),
+      svg: document.getElementById("network"),
+      empty: document.getElementById("emptyState"),
+      detailTitle: document.getElementById("detailTitle"),
+      detailCopy: document.getElementById("detailCopy"),
+      edgeList: document.getElementById("edgeList")
+    };
+
+    function parseCsv(text) {
+      const rows = [];
+      let row = [];
+      let value = "";
+      let quoted = false;
+      for (let i = 0; i < text.length; i += 1) {
+        const char = text[i];
+        const next = text[i + 1];
+        if (char === '"' && quoted && next === '"') {
+          value += '"';
+          i += 1;
+        } else if (char === '"') {
+          quoted = !quoted;
+        } else if (char === "," && !quoted) {
+          row.push(value);
+          value = "";
+        } else if ((char === "\n" || char === "\r") && !quoted) {
+          if (value || row.length) {
+            row.push(value);
+            rows.push(row);
+          }
+          value = "";
+          row = [];
+          if (char === "\r" && next === "\n") i += 1;
+        } else {
+          value += char;
+        }
+      }
+      if (value || row.length) {
+        row.push(value);
+        rows.push(row);
+      }
+      const headers = rows.shift() || [];
+      return rows.map((cells) => Object.fromEntries(headers.map((header, index) => [header, cells[index] || ""])));
+    }
+
+    async function loadCsv(path) {
+      const response = await fetch(path);
+      if (!response.ok) throw new Error(`Unable to load ${path}`);
+      return parseCsv(await response.text());
+    }
+
+    function setLoading(isLoading) {
+      els.loading.hidden = !isLoading;
+      els.loading.setAttribute("aria-hidden", String(!isLoading));
+      els.mapWrap.hidden = isLoading;
+    }
+
+    function industryNodes() {
+      return state.nodes
+        .filter((node) => node.market === state.market && node.plate_type === "INDUSTRY")
+        .sort((a, b) => a.domain.localeCompare(b.domain) || Number(a.research_priority) - Number(b.research_priority) || a.name.localeCompare(b.name));
+    }
+
+    function selectedIndustry() {
+      return state.nodes.find((node) => node.code === state.industryCode && node.market === state.market);
+    }
+
+    function nodesForSelection() {
+      const selected = selectedIndustry();
+      if (!selected) return [];
+      const domainNodes = state.nodes
+        .filter((node) => node.market === state.market && node.domain === selected.domain && ["INDUSTRY", "CONCEPT"].includes(node.plate_type))
+        .filter((node) => roles.includes(node.value_chain_role))
+        .sort((a, b) => Number(a.research_priority) - Number(b.research_priority) || a.name.localeCompare(b.name));
+      const picked = [];
+      roles.forEach((role) => {
+        const roleNodes = domainNodes.filter((node) => node.value_chain_role === role);
+        const limited = roleNodes.slice(0, role === "cross_chain" ? 3 : 5);
+        picked.push(...limited);
+      });
+      if (!picked.some((node) => node.node_id === selected.node_id)) picked.push(selected);
+      return Array.from(new Map(picked.map((node) => [node.node_id, node])).values());
+    }
+
+    function edgesForNodes(nodes) {
+      const nodeIds = new Set(nodes.map((node) => node.node_id));
+      return state.edges.filter((edge) => nodeIds.has(edge.source_id) && nodeIds.has(edge.target_id));
+    }
+
+    function populateControls() {
+      const markets = Array.from(new Set(state.nodes.map((node) => node.market))).sort();
+      els.market.innerHTML = markets.map((market) => `<option value="${market}">${market}</option>`).join("");
+      if (!markets.includes(state.market)) state.market = markets[0] || "HK";
+      els.market.value = state.market;
+      populateIndustries();
+    }
+
+    function populateIndustries() {
+      const options = industryNodes();
+      if (!state.industryCode || !options.some((node) => node.code === state.industryCode)) {
+        const firstPriority = options.find((node) => node.research_priority === "1") || options[0];
+        state.industryCode = firstPriority ? firstPriority.code : "";
+      }
+      els.industry.innerHTML = options.map((node) => {
+        const label = `${node.name} · ${node.domain}`;
+        return `<option value="${node.code}">${label}</option>`;
+      }).join("");
+      els.industry.value = state.industryCode;
+    }
+
+    function renderMetrics(nodes, edges) {
+      const selected = selectedIndustry();
+      const marketCount = state.nodes.filter((node) => node.market === state.market).length;
+      const industryCount = industryNodes().length;
+      els.metrics.innerHTML = [
+        ["Plates in view", nodes.length],
+        ["Edges in view", edges.length],
+        ["Market plates", marketCount],
+        ["Industries", industryCount]
+      ].map(([label, value]) => `<div class="metric"><strong>${value}</strong><span>${label}</span></div>`).join("");
+
+      const counts = Object.fromEntries(roles.map((role) => [role, nodes.filter((node) => node.value_chain_role === role).length]));
+      els.roleList.innerHTML = roles.map((role) => `
+        <div class="role-item">
+          <b>${roleLabels[role]}</b>
+          <span>${selected && selected.value_chain_role === role ? "selected layer" : "adjacent layer"}</span>
+          <code>${counts[role]}</code>
+        </div>
+      `).join("");
+    }
+
+    function renderHeader(nodes, edges) {
+      const selected = selectedIndustry();
+      if (!selected) return;
+      els.title.textContent = `${selected.market} ${selected.name}`;
+      els.copy.textContent = `${selected.domain}. ${selected.name} is classified as ${roleLabels[selected.value_chain_role] || selected.value_chain_role}; the view shows nearby plates in the same market and domain for supply-chain mapping.`;
+      els.status.textContent = `${nodes.length} plates · ${edges.length} edges`;
+      els.detailTitle.textContent = `${selected.code} · ${selected.name}`;
+      els.detailCopy.textContent = `${selected.name} is a Moomoo ${selected.plate_type.toLowerCase()} plate. Treat the role assignment as a starting point, then validate constituents with plate-stock queries and company filings before turning any edge into research evidence.`;
+    }
+
+    function nodePosition(node, index, grouped, width, height) {
+      const activeRoles = roles.filter((role) => grouped[role] && grouped[role].length);
+      const roleIndex = Math.max(0, activeRoles.indexOf(node.value_chain_role));
+      const columnCount = Math.max(1, activeRoles.length);
+      const x = 86 + roleIndex * ((width - 172) / Math.max(1, columnCount - 1));
+      const items = grouped[node.value_chain_role] || [];
+      const itemIndex = items.findIndex((item) => item.node_id === node.node_id);
+      const y = 92 + itemIndex * Math.min(88, (height - 170) / Math.max(1, items.length));
+      return { x, y };
+    }
+
+    function renderMap(nodes, edges) {
+      const width = els.mapWrap.clientWidth || 900;
+      const height = window.matchMedia("(max-width: 920px)").matches ? 620 : 560;
+      const grouped = Object.fromEntries(roles.map((role) => [role, nodes.filter((node) => node.value_chain_role === role)]));
+      const positions = new Map(nodes.map((node, index) => [node.node_id, nodePosition(node, index, grouped, width, height)]));
+      const selected = selectedIndustry();
+
+      els.empty.classList.toggle("is-visible", nodes.length === 0);
+      els.mapWrap.hidden = nodes.length === 0;
+      if (!nodes.length) return;
+
+      const activeRoles = roles.filter((role) => grouped[role] && grouped[role].length);
+      const labels = activeRoles.map((role) => {
+        const first = grouped[role][0];
+        const pos = positions.get(first.node_id);
+        return `<text class="column-label" x="${pos.x - 74}" y="36">${roleLabels[role]}</text>`;
+      }).join("");
+
+      const edgeMarkup = edges.map((edge) => {
+        const source = positions.get(edge.source_id);
+        const target = positions.get(edge.target_id);
+        if (!source || !target) return "";
+        const mid = (source.x + target.x) / 2;
+        return `<path class="edge" d="M ${source.x + 74} ${source.y + 22} C ${mid} ${source.y + 22}, ${mid} ${target.y + 22}, ${target.x - 74} ${target.y + 22}"/>`;
+      }).join("");
+
+      const nodeMarkup = nodes.map((node) => {
+        const pos = positions.get(node.node_id);
+        const selectedClass = selected && selected.node_id === node.node_id ? " is-selected" : "";
+        const safeName = escapeHtml(node.name.length > 20 ? `${node.name.slice(0, 19)}…` : node.name);
+        return `
+          <g class="node${selectedClass}" data-node-id="${node.node_id}" tabindex="0" transform="translate(${pos.x - 74}, ${pos.y})">
+            <rect class="node-shell" width="148" height="58" rx="0"></rect>
+            <text class="node-label" x="12" y="23">${safeName}</text>
+            <text class="node-meta" x="12" y="43">${node.code} · P${node.research_priority}</text>
+          </g>
+        `;
+      }).join("");
+
+      els.svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+      els.svg.innerHTML = `${labels}${edgeMarkup}${nodeMarkup}`;
+      els.svg.querySelectorAll(".node").forEach((group) => {
+        group.addEventListener("click", () => selectNode(group.dataset.nodeId));
+        group.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectNode(group.dataset.nodeId);
+          }
+        });
+      });
+    }
+
+    function renderEdges(edges) {
+      if (!edges.length) {
+        els.edgeList.innerHTML = `<div class="edge-row"><code>No direct graph edges yet</code>Use this as a queue to source constituent-level relationships.</div>`;
+        return;
+      }
+      const names = new Map(state.nodes.map((node) => [node.node_id, node.name]));
+      els.edgeList.innerHTML = edges.map((edge) => `
+        <div class="edge-row">
+          <code>${escapeHtml(names.get(edge.source_id) || edge.source_id)} to ${escapeHtml(names.get(edge.target_id) || edge.target_id)}</code>
+          ${escapeHtml(edge.rationale)}
+        </div>
+      `).join("");
+    }
+
+    function selectNode(nodeId) {
+      const node = state.nodes.find((item) => item.node_id === nodeId);
+      if (!node) return;
+      state.selectedNodeId = nodeId;
+      els.detailTitle.textContent = `${node.code} · ${node.name}`;
+      els.detailCopy.textContent = `${node.name} sits in ${node.domain} as ${roleLabels[node.value_chain_role] || node.value_chain_role}. Priority ${node.research_priority} means ${node.research_priority === "1" ? "it is suitable for first-pass sector rotation." : "it should be reviewed after higher-signal industry plates."}`;
+      els.svg.querySelectorAll(".node").forEach((group) => {
+        group.classList.toggle("is-selected", group.dataset.nodeId === nodeId);
+      });
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function render() {
+      const nodes = nodesForSelection();
+      const edges = edgesForNodes(nodes);
+      renderHeader(nodes, edges);
+      renderMetrics(nodes, edges);
+      renderMap(nodes, edges);
+      renderEdges(edges);
+    }
+
+    async function init() {
+      try {
+        setLoading(true);
+        const [nodes, edges] = await Promise.all([loadCsv(NODE_PATH), loadCsv(EDGE_PATH)]);
+        state.nodes = nodes;
+        state.edges = edges;
+        populateControls();
+        setLoading(false);
+        render();
+      } catch (error) {
+        setLoading(false);
+        els.mapWrap.hidden = true;
+        els.empty.classList.add("is-visible");
+        els.title.textContent = "Unable to load sector universe";
+        els.copy.textContent = error.message;
+        els.status.textContent = "Error";
+      }
+    }
+
+    els.market.addEventListener("change", (event) => {
+      state.market = event.target.value;
+      state.industryCode = "";
+      populateIndustries();
+      render();
+    });
+
+    els.industry.addEventListener("change", (event) => {
+      state.industryCode = event.target.value;
+      render();
+    });
+
+    window.addEventListener("resize", () => {
+      if (state.nodes.length) render();
+    });
+
+    init();
+  </script>
+</body>
+</html>

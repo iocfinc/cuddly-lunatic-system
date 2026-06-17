@@ -62,4 +62,3 @@ def test_invalid_market_and_sector_raise_clear_errors() -> None:
 
     with pytest.raises(FinancePowerMapError, match="Only HK finance"):
         build_hk_finance_power_map_report(FinancePowerMapRequest(market="HK", sector="consumer-services"))
-

@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from quant_researcher_desk.moomoo_options_report import MoomooOpenDQuoteClient, OptionsReportError  # noqa: E402
+from quant_researcher_desk.journal import OptionsJournalStore, entry_from_options_report  # noqa: E402
 from quant_researcher_desk.options_research import (  # noqa: E402
     FixtureOptionsResearchProvider,
     OptionsResearchRequest,
@@ -83,8 +84,20 @@ def main() -> int:
     parser.add_argument("--risk-free-rate", type=float, default=0.04)
     parser.add_argument("--output-dir", type=pathlib.Path, default=ROOT / "reports" / "options")
     parser.add_argument("--report-format", choices=("pdf", "html"), default="pdf")
+    parser.add_argument("--persist-journal", action="store_true", help="Persist the generated report to the local options journal.")
+    parser.add_argument("--journal-dir", type=pathlib.Path, default=ROOT / "reports" / "journal")
     parser.add_argument("--pricing-engine", choices=("legacy", "quantlib"), default="legacy")
     parser.add_argument("--shadow-compare", action="store_true", help="Add legacy-vs-QuantLib shadow comparison metadata and sections.")
+    parser.add_argument(
+        "--strategy-gate-passed",
+        action="store_true",
+        help="Render post-gate strategy comparison after the stock/tape/product gate has passed.",
+    )
+    parser.add_argument(
+        "--strategy-gate-reason",
+        default="Operator supplied stock/tape/product gate passed.",
+        help="Short reason shown when post-gate strategy comparison is enabled.",
+    )
     parser.add_argument(
         "--visual-explainer",
         action="store_true",
@@ -109,6 +122,8 @@ def main() -> int:
         risk_free_rate=args.risk_free_rate,
         pricing_engine=args.pricing_engine,
         shadow_compare=args.shadow_compare,
+        strategy_gate_passed=args.strategy_gate_passed,
+        strategy_gate_reason=args.strategy_gate_reason,
     )
 
     try:
@@ -131,11 +146,17 @@ def main() -> int:
         "pricing_engine": report.pricing_engine,
         "shadow_compare": "yes" if report.shadow_compare else "no",
         "shadow_status": (report.quantlib_vs_legacy_diff or {}).get("status", "off"),
+        "strategy_gate": "passed" if report.strategy_gate_passed else "suppressed",
         "visual_explainer": "yes" if args.visual_explainer else "no",
     }
     attachment = render_attachment(title, sections, metadata, args.output_dir, args.report_format)
     preview_image = render_preview_image(title, sections, metadata, args.output_dir) if args.render_image else None
     caption = format_options_telegram_html(report, include_image=preview_image is not None)
+    if args.persist_journal:
+        journal_store = OptionsJournalStore(args.journal_dir)
+        journal_entry = entry_from_options_report(report, attachment)
+        journal_path = journal_store.upsert_entry(journal_entry)
+        print(f"journal: {journal_path}#{journal_entry.id}")
 
     if args.dry_run or not args.post:
         print(caption)

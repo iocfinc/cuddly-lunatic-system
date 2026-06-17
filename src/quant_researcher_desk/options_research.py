@@ -69,6 +69,15 @@ class EarningsContext:
 
 
 @dataclass(frozen=True)
+class HistoricalVolatilityContext:
+    value: float
+    source: str = "request_default"
+    status: str = "defaulted"
+    summary: str = "No historical volatility provider configured; using the request default."
+    as_of: str | None = None
+
+
+@dataclass(frozen=True)
 class OptionContract:
     code: str
     option_type: str
@@ -102,6 +111,35 @@ class ScenarioRow:
 
 
 @dataclass(frozen=True)
+class StrategyLeg:
+    action: str
+    option_type: str
+    strike: float
+    expiry: str
+    premium: float
+    code: str
+
+
+@dataclass(frozen=True)
+class StrategyCandidate:
+    name: str
+    structure: str
+    legs: tuple[StrategyLeg, ...]
+    net_debit: float
+    max_loss: float
+    max_profit: float | None
+    breakeven: float
+    model_edge: float
+    model_edge_pct: float
+    liquidity_score: float
+    score: float
+    directional_assumption: str
+    context_freshness: str
+    rationale: str
+    risks: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class OptionsResearchRequest:
     symbol: str
     option_code: str | None = None
@@ -117,6 +155,8 @@ class OptionsResearchRequest:
     days_forward: int = 7
     pricing_engine: str = "legacy"
     shadow_compare: bool = False
+    strategy_gate_passed: bool = False
+    strategy_gate_reason: str = "Stock/tape/product gate was not provided, so strategy comparison is suppressed."
 
 
 @dataclass(frozen=True)
@@ -144,19 +184,26 @@ class OptionsResearchReport:
     thesis: str
     risks: list[str]
     earnings: EarningsContext
+    historical_volatility_source: str = "request_default"
+    historical_volatility_status: str = "defaulted"
+    historical_volatility_summary: str = "No historical volatility provider configured; using the request default."
+    historical_volatility_as_of: str | None = None
     resale_thesis_summary: str = ""
     exit_quality_summary: str = ""
     event_risk_summary: str = ""
     pricing_engine: str = "legacy"
     shadow_compare: bool = False
     quantlib_vs_legacy_diff: dict[str, Any] | None = None
+    strategy_gate_passed: bool = False
+    strategy_gate_reason: str = ""
+    strategy_candidates: tuple[StrategyCandidate, ...] = ()
 
 
 class FixtureOptionsResearchProvider:
     """Deterministic provider used for offline tests and cron dry-runs."""
 
     def __init__(self, anchor_date: dt.date | None = None) -> None:
-        self.anchor_date = anchor_date or dt.date(2026, 5, 26)
+        self.anchor_date = anchor_date or dt.datetime.now(dt.timezone.utc).astimezone().date()
 
     def get_underlying_snapshot(self, symbol: str) -> dict[str, Any]:
         return {"code": symbol, "last_price": fixture_spot(symbol)}
@@ -196,6 +243,15 @@ class FixtureOptionsResearchProvider:
             risk_level="high",
             within_holding_window=True,
             source="fixture",
+        )
+
+    def get_historical_volatility(self, symbol: str) -> HistoricalVolatilityContext:
+        return HistoricalVolatilityContext(
+            value=0.30,
+            source="fixture",
+            status="fixture-backed",
+            summary="Fixture historical volatility baseline for offline report validation.",
+            as_of=self.anchor_date.isoformat(),
         )
 
 
@@ -746,6 +802,67 @@ def get_earnings_context(provider: OptionsResearchProvider, symbol: str) -> Earn
     )
 
 
+def _request_historical_volatility_context(request: OptionsResearchRequest, *, summary: str | None = None) -> HistoricalVolatilityContext:
+    return HistoricalVolatilityContext(
+        value=request.historical_volatility,
+        source="request_default",
+        status="defaulted",
+        summary=summary or "No historical volatility provider configured; using the request default.",
+    )
+
+
+def _coerce_historical_volatility_context(
+    value: Any,
+    request: OptionsResearchRequest,
+) -> HistoricalVolatilityContext:
+    if isinstance(value, HistoricalVolatilityContext):
+        context = value
+    elif isinstance(value, dict):
+        context = HistoricalVolatilityContext(
+            value=as_float(value.get("value")) or request.historical_volatility,
+            source=str(value.get("source") or "provider"),
+            status=str(value.get("status") or "provided"),
+            summary=str(value.get("summary") or "Historical volatility supplied by provider."),
+            as_of=str(value["as_of"]) if value.get("as_of") is not None else None,
+        )
+    elif isinstance(value, int | float):
+        context = HistoricalVolatilityContext(
+            value=float(value),
+            source="provider",
+            status="provided",
+            summary="Historical volatility supplied by provider.",
+        )
+    else:
+        return _request_historical_volatility_context(
+            request,
+            summary="Historical volatility provider returned an unsupported value; using the request default.",
+        )
+    if context.value <= 0:
+        return HistoricalVolatilityContext(
+            value=request.historical_volatility,
+            source=context.source,
+            status="missing",
+            summary="Historical volatility provider returned a non-positive value; using the request default.",
+            as_of=context.as_of,
+        )
+    return context
+
+
+def get_historical_volatility_context(provider: OptionsResearchProvider, request: OptionsResearchRequest) -> HistoricalVolatilityContext:
+    getter = getattr(provider, "get_historical_volatility", None)
+    if not callable(getter):
+        return _request_historical_volatility_context(request)
+    try:
+        return _coerce_historical_volatility_context(getter(request.symbol), request)
+    except Exception as exc:
+        return HistoricalVolatilityContext(
+            value=request.historical_volatility,
+            source="provider",
+            status="missing",
+            summary=f"Historical volatility provider failed ({exc}); using the request default.",
+        )
+
+
 def classify_event_risk(context: EarningsContext) -> str:
     level = context.risk_level.strip().lower()
     if level in {"low", "medium", "high", "unknown"}:
@@ -922,6 +1039,268 @@ def build_scenarios(
     return rows
 
 
+def strategy_liquidity_score(contract: OptionContract) -> float:
+    volume_score = min(contract.volume / 500, 1.0)
+    open_interest_score = min(contract.open_interest / 1000, 1.0)
+    return round((volume_score + open_interest_score) / 2, 4)
+
+
+def _strategy_leg(action: str, contract: OptionContract) -> StrategyLeg:
+    return StrategyLeg(
+        action=action,
+        option_type=contract.option_type,
+        strike=contract.strike,
+        expiry=contract.expiry,
+        premium=contract.market_price,
+        code=contract.code,
+    )
+
+
+def _single_leg_strategy_candidate(
+    contract: OptionContract,
+    *,
+    model_value: float,
+    context_freshness: str,
+) -> StrategyCandidate:
+    max_loss = contract.market_price
+    breakeven = contract.strike + contract.market_price if contract.option_type == "CALL" else contract.strike - contract.market_price
+    model_edge = model_value - contract.market_price
+    model_edge_pct = model_edge / contract.market_price if contract.market_price else 0.0
+    liquidity_score = strategy_liquidity_score(contract)
+    return StrategyCandidate(
+        name=f"Long {contract.option_type.title()}",
+        structure="single-leg",
+        legs=(_strategy_leg("buy", contract),),
+        net_debit=contract.market_price,
+        max_loss=max_loss,
+        max_profit=None,
+        breakeven=breakeven,
+        model_edge=model_edge,
+        model_edge_pct=model_edge_pct,
+        liquidity_score=liquidity_score,
+        score=round(model_edge_pct + liquidity_score, 4),
+        directional_assumption="bullish" if contract.option_type == "CALL" else "bearish",
+        context_freshness=context_freshness,
+        rationale=(
+            "Keeps the cleanest directional exposure after the gate has passed, while preserving full premium-at-risk visibility."
+        ),
+        risks=("Full debit is at risk if the underlying fails to move before time decay accelerates.",),
+    )
+
+
+def _spread_partner_contract(contracts: list[OptionContract], selected_contract: OptionContract) -> OptionContract | None:
+    same_lane = [
+        contract
+        for contract in contracts
+        if contract.expiry == selected_contract.expiry
+        and contract.option_type == selected_contract.option_type
+        and contract.code != selected_contract.code
+    ]
+    if selected_contract.option_type == "CALL":
+        candidates = [contract for contract in same_lane if contract.strike > selected_contract.strike]
+        return sorted(candidates, key=lambda contract: contract.strike)[0] if candidates else None
+    candidates = [contract for contract in same_lane if contract.strike < selected_contract.strike]
+    return sorted(candidates, key=lambda contract: contract.strike, reverse=True)[0] if candidates else None
+
+
+def _vertical_spread_strategy_candidate(
+    selected_contract: OptionContract,
+    short_contract: OptionContract,
+    *,
+    selected_model_value: float,
+    short_model_value: float,
+    context_freshness: str,
+) -> StrategyCandidate | None:
+    net_debit = selected_contract.market_price - short_contract.market_price
+    spread_width = abs(short_contract.strike - selected_contract.strike)
+    max_profit = spread_width - net_debit
+    if net_debit <= 0 or max_profit <= 0:
+        return None
+    breakeven = (
+        selected_contract.strike + net_debit
+        if selected_contract.option_type == "CALL"
+        else selected_contract.strike - net_debit
+    )
+    model_value = selected_model_value - short_model_value
+    model_edge = model_value - net_debit
+    model_edge_pct = model_edge / net_debit if net_debit else 0.0
+    liquidity_score = min(strategy_liquidity_score(selected_contract), strategy_liquidity_score(short_contract))
+    return StrategyCandidate(
+        name=f"{selected_contract.option_type.title()} Debit Spread",
+        structure="vertical-spread",
+        legs=(_strategy_leg("buy", selected_contract), _strategy_leg("sell", short_contract)),
+        net_debit=net_debit,
+        max_loss=net_debit,
+        max_profit=max_profit,
+        breakeven=breakeven,
+        model_edge=model_edge,
+        model_edge_pct=model_edge_pct,
+        liquidity_score=liquidity_score,
+        score=round(model_edge_pct + liquidity_score + min(max_profit / max(net_debit, 0.01), 2.0) * 0.10, 4),
+        directional_assumption="bullish capped" if selected_contract.option_type == "CALL" else "bearish capped",
+        context_freshness=context_freshness,
+        rationale=(
+            "Caps upside but lowers debit at risk, useful when the stock-first gate passes yet premium still needs discipline."
+        ),
+        risks=("Spread exits can be harder than single-leg exits if the short leg loses liquidity.",),
+    )
+
+
+def _closest_contract(contracts: list[OptionContract], option_type: str, underlying_price: float) -> OptionContract | None:
+    candidates = [contract for contract in contracts if contract.option_type == option_type]
+    return sorted(candidates, key=lambda contract: (abs(contract.strike - underlying_price), -contract.volume))[0] if candidates else None
+
+
+def _covered_call_strategy_candidate(
+    call_contract: OptionContract,
+    *,
+    underlying_price: float,
+    call_model_value: float,
+    context_freshness: str,
+) -> StrategyCandidate:
+    max_profit = max(call_contract.strike - underlying_price, 0.0) + call_contract.market_price
+    max_loss = max(underlying_price - call_contract.market_price, 0.0)
+    breakeven = underlying_price - call_contract.market_price
+    model_edge = call_contract.market_price - call_model_value
+    model_edge_pct = model_edge / call_contract.market_price if call_contract.market_price else 0.0
+    liquidity_score = strategy_liquidity_score(call_contract)
+    return StrategyCandidate(
+        name="Covered Call",
+        structure="stock-plus-short-call",
+        legs=(StrategyLeg("hold", "STOCK", underlying_price, call_contract.expiry, underlying_price, "UNDERLYING"), _strategy_leg("sell", call_contract)),
+        net_debit=underlying_price - call_contract.market_price,
+        max_loss=max_loss,
+        max_profit=max_profit,
+        breakeven=breakeven,
+        model_edge=model_edge,
+        model_edge_pct=model_edge_pct,
+        liquidity_score=liquidity_score,
+        score=round(model_edge_pct + liquidity_score, 4),
+        directional_assumption="neutral-to-moderately bullish",
+        context_freshness=context_freshness,
+        rationale="Uses stock ownership plus short-call premium to frame a capped-upside income structure for deeper review.",
+        risks=("Requires stock ownership and caps upside above the short strike; included for research comparison only.",),
+    )
+
+
+def _cash_secured_put_strategy_candidate(
+    put_contract: OptionContract,
+    *,
+    put_model_value: float,
+    context_freshness: str,
+) -> StrategyCandidate:
+    max_profit = put_contract.market_price
+    max_loss = max(put_contract.strike - put_contract.market_price, 0.0)
+    breakeven = put_contract.strike - put_contract.market_price
+    model_edge = put_contract.market_price - put_model_value
+    model_edge_pct = model_edge / put_contract.market_price if put_contract.market_price else 0.0
+    liquidity_score = strategy_liquidity_score(put_contract)
+    return StrategyCandidate(
+        name="Cash-Secured Put",
+        structure="short-put-cash-secured",
+        legs=(_strategy_leg("sell", put_contract), StrategyLeg("reserve", "CASH", put_contract.strike, put_contract.expiry, max_loss, "CASH_COLLATERAL")),
+        net_debit=0.0,
+        max_loss=max_loss,
+        max_profit=max_profit,
+        breakeven=breakeven,
+        model_edge=model_edge,
+        model_edge_pct=model_edge_pct,
+        liquidity_score=liquidity_score,
+        score=round(model_edge_pct + liquidity_score, 4),
+        directional_assumption="neutral-to-moderately bullish",
+        context_freshness=context_freshness,
+        rationale="Frames assignment-risk and premium received as a cash-secured structure for comparison, not as an instruction.",
+        risks=("Assignment risk is explicit; max loss approximates strike less premium if the underlying falls sharply.",),
+    )
+
+
+def build_strategy_candidates(
+    contracts: list[OptionContract],
+    selected_contract: OptionContract,
+    *,
+    underlying_price: float,
+    years: float,
+    volatility: float,
+    selected_model_value: float,
+    request: OptionsResearchRequest,
+    context_freshness: str,
+    pricing_engines: dict[str, Any] | None = None,
+) -> tuple[StrategyCandidate, ...]:
+    if not request.strategy_gate_passed:
+        return ()
+    candidates: list[StrategyCandidate] = [
+        _single_leg_strategy_candidate(
+            selected_contract,
+            model_value=selected_model_value,
+            context_freshness=context_freshness,
+        )
+    ]
+    short_contract = _spread_partner_contract(contracts, selected_contract)
+    if short_contract is not None:
+        short_model = price_option_with_engine(
+            request.pricing_engine,
+            short_contract.option_type,
+            underlying_price,
+            short_contract.strike,
+            years,
+            short_contract.implied_volatility or volatility,
+            request.risk_free_rate,
+            request.dividend_yield,
+            pricing_engines,
+        )
+        spread_candidate = _vertical_spread_strategy_candidate(
+            selected_contract,
+            short_contract,
+            selected_model_value=selected_model_value,
+            short_model_value=short_model.theoretical_value,
+            context_freshness=context_freshness,
+        )
+        if spread_candidate is not None:
+            candidates.append(spread_candidate)
+    call_contract = selected_contract if selected_contract.option_type == "CALL" else _closest_contract(contracts, "CALL", underlying_price)
+    if call_contract is not None:
+        call_model_value = selected_model_value if call_contract.code == selected_contract.code else price_option_with_engine(
+            request.pricing_engine,
+            call_contract.option_type,
+            underlying_price,
+            call_contract.strike,
+            years,
+            call_contract.implied_volatility or volatility,
+            request.risk_free_rate,
+            request.dividend_yield,
+            pricing_engines,
+        ).theoretical_value
+        candidates.append(
+            _covered_call_strategy_candidate(
+                call_contract,
+                underlying_price=underlying_price,
+                call_model_value=call_model_value,
+                context_freshness=context_freshness,
+            )
+        )
+    put_contract = selected_contract if selected_contract.option_type == "PUT" else _closest_contract(contracts, "PUT", underlying_price)
+    if put_contract is not None:
+        put_model_value = selected_model_value if put_contract.code == selected_contract.code else price_option_with_engine(
+            request.pricing_engine,
+            put_contract.option_type,
+            underlying_price,
+            put_contract.strike,
+            years,
+            put_contract.implied_volatility or volatility,
+            request.risk_free_rate,
+            request.dividend_yield,
+            pricing_engines,
+        ).theoretical_value
+        candidates.append(
+            _cash_secured_put_strategy_candidate(
+                put_contract,
+                put_model_value=put_model_value,
+                context_freshness=context_freshness,
+            )
+        )
+    return tuple(sorted(candidates, key=lambda candidate: candidate.score, reverse=True))
+
+
 def research_verdict(
     contract: OptionContract,
     model_edge_pct: float,
@@ -1013,6 +1392,18 @@ def build_options_research_report(
     )
     model_edge = model.theoretical_value - contract.market_price
     model_edge_pct = model_edge / contract.market_price
+    historical_volatility = get_historical_volatility_context(provider, request)
+    strategy_candidates = build_strategy_candidates(
+        contracts,
+        contract,
+        underlying_price=underlying_price,
+        years=years,
+        volatility=volatility,
+        selected_model_value=model.theoretical_value,
+        request=request,
+        context_freshness=historical_volatility.status,
+        pricing_engines=pricing_engines,
+    )
     scenarios = build_scenarios(contract, underlying_price, volatility, years, request)
     mc_distribution = monte_carlo_option_distribution(
         contract.option_type,
@@ -1026,7 +1417,7 @@ def build_options_research_report(
         seed=11,
     )
     earnings = get_earnings_context(provider, request.symbol)
-    verdict, thesis, risks = research_verdict(contract, model_edge_pct, volatility, request.historical_volatility, earnings)
+    verdict, thesis, risks = research_verdict(contract, model_edge_pct, volatility, historical_volatility.value, earnings)
     black_scholes_curve = build_black_scholes_curve(contract, underlying_price, volatility, years, request)
     monte_carlo_paths = build_monte_carlo_sample_paths(underlying_price, volatility, years, request)
     days_to_expiry = max((dt.date.fromisoformat(contract.expiry[:10]) - now.date()).days, 0)
@@ -1054,7 +1445,7 @@ def build_options_research_report(
         fair_value_gap_pct=model_edge_pct,
         valuation_view=valuation_view(model_edge_pct),
         implied_volatility_used=volatility,
-        historical_volatility=request.historical_volatility,
+        historical_volatility=historical_volatility.value,
         scenario_rows=scenarios,
         monte_carlo_distribution=monte_carlo_distribution_buckets(mc_distribution),
         smile_curve=build_smile_curve(chain_rows, snapshot_rows, selected_expiry),
@@ -1066,10 +1457,17 @@ def build_options_research_report(
         pricing_engine=request.pricing_engine,
         shadow_compare=request.shadow_compare,
         quantlib_vs_legacy_diff=shadow_summary,
+        strategy_gate_passed=request.strategy_gate_passed,
+        strategy_gate_reason=request.strategy_gate_reason,
+        strategy_candidates=strategy_candidates,
         verdict=verdict,
         thesis=thesis,
         risks=risks,
         earnings=earnings,
+        historical_volatility_source=historical_volatility.source,
+        historical_volatility_status=historical_volatility.status,
+        historical_volatility_summary=historical_volatility.summary,
+        historical_volatility_as_of=historical_volatility.as_of,
         resale_thesis_summary=resale_thesis_summary(
             contract,
             valuation=valuation_view(model_edge_pct),
@@ -1142,6 +1540,73 @@ def _pricing_migration_section(report: OptionsResearchReport) -> dict[str, objec
     }
 
 
+def _strategy_comparison_section(report: OptionsResearchReport) -> dict[str, object] | None:
+    if not report.strategy_gate_passed:
+        return None
+    if not report.strategy_candidates:
+        return {
+            "title": "Post-Gate Strategy Comparison",
+            "content": (
+                f"Gate passed: {report.strategy_gate_reason}\n\n"
+                "No viable alternate option structures were found in the selected chain. Research output only, not a trading instruction."
+            ),
+        }
+    table = []
+    for candidate in report.strategy_candidates:
+        legs = " / ".join(
+            f"{leg.action} {leg.option_type} {leg.strike:g} @ {format_money(leg.premium)}"
+            for leg in candidate.legs
+        )
+        table.append(
+            {
+                "strategy": candidate.name,
+                "structure": candidate.structure,
+                "legs": legs,
+                "net_debit": format_money(candidate.net_debit),
+                "max_loss": format_money(candidate.max_loss),
+                "max_profit": "uncapped" if candidate.max_profit is None else format_money(candidate.max_profit),
+                "breakeven": format_money(candidate.breakeven),
+                "model_edge": f"{format_money(candidate.model_edge)} ({format_pct(candidate.model_edge_pct)})",
+                "liquidity": f"{candidate.liquidity_score:.2f}",
+                "direction": candidate.directional_assumption,
+                "context": candidate.context_freshness,
+                "score": f"{candidate.score:.2f}",
+            }
+        )
+    return {
+        "title": "Post-Gate Strategy Comparison",
+        "summary": (
+            f"Gate passed: {report.strategy_gate_reason} "
+            "These are comparable research structures after the stock/tape/product gate, not execution instructions."
+        ),
+        "table": table,
+        "items": [candidate.rationale for candidate in report.strategy_candidates],
+    }
+
+
+def analyst_desk_note(report: OptionsResearchReport) -> str:
+    primary_risk = report.risks[0] if report.risks else "Sizing and event timing still require human review."
+    return "\n\n".join(
+        [
+            f"Statement: {report.contract.code} screens as {report.verdict.lower()} for further options-desk review.",
+            (
+                "Evidence: "
+                f"fair value is {format_money(report.model.theoretical_value)} versus {format_money(report.contract.market_price)} market premium, "
+                f"the gap is {format_pct(report.fair_value_gap_pct)}, IV/HV is "
+                f"{format_pct(report.implied_volatility_used)}/{format_pct(report.historical_volatility)}, and liquidity is "
+                f"{report.contract.volume:,} volume / {report.contract.open_interest:,} open interest."
+            ),
+            (
+                "Interpretation: "
+                f"the premium reads {report.valuation_view.lower()} in a {classify_event_risk(report.earnings)} event-risk context, "
+                "so the useful question is whether valuation, liquidity, and catalyst timing are aligned enough for deeper research."
+            ),
+            f"Risk: {primary_risk}",
+            f"Verdict: {report.verdict}. Research output only, not a trading instruction.",
+        ]
+    )
+
+
 def options_report_sections(
     report: OptionsResearchReport,
     *,
@@ -1168,7 +1633,7 @@ def options_report_sections(
         f"{report.verdict.lower()}: enough to track, but still governed by liquidity, spread discipline, and the next catalyst."
     )
     sections: list[dict[str, object]] = [
-        {"title": "Desk View", "content": f"{report.thesis}\n\n{setup_copy}"},
+        {"title": "Desk View", "content": f"{analyst_desk_note(report)}\n\n{setup_copy}"},
         {
             "title": "Resale Lane Read",
             "items": [
@@ -1209,6 +1674,8 @@ def options_report_sections(
                 {"metric": "Pricing Engine", "value": report.pricing_engine},
                 {"metric": "Shadow Compare", "value": "On" if report.shadow_compare else "Off"},
                 {"metric": "IV / HV", "value": f"{format_pct(report.implied_volatility_used)} / {format_pct(report.historical_volatility)}"},
+                {"metric": "HV Source", "value": report.historical_volatility_source},
+                {"metric": "HV Status", "value": report.historical_volatility_status},
                 {"metric": "Delta", "value": f"{report.model.delta:.3f}"},
                 {"metric": "Gamma", "value": f"{report.model.gamma:.4f}"},
                 {"metric": "Theta / Day", "value": f"{report.model.theta:.4f}"},
@@ -1232,9 +1699,24 @@ def options_report_sections(
                 "The desk read is intentionally conservative: if the catalyst is not mapped, the model should not pretend the premium is clean."
             ),
         },
+        {
+            "title": "Context Freshness",
+            "table": [
+                {"metric": "Historical Volatility", "value": format_pct(report.historical_volatility)},
+                {"metric": "HV Source", "value": report.historical_volatility_source},
+                {"metric": "HV Status", "value": report.historical_volatility_status},
+                {"metric": "HV As Of", "value": report.historical_volatility_as_of or "not provided"},
+                {"metric": "HV Note", "value": report.historical_volatility_summary},
+                {"metric": "Event Source", "value": report.earnings.source},
+                {"metric": "Event Risk", "value": classify_event_risk(report.earnings)},
+            ],
+        },
         {"title": "Risk Register", "items": report.risks},
         {"title": "Verdict", "content": f"{report.verdict}\n\n{RISK_NOTE}"},
     ]
+    strategy_section = _strategy_comparison_section(report)
+    if strategy_section is not None:
+        sections.insert(5, strategy_section)
     migration_section = _pricing_migration_section(report)
     if migration_section is not None:
         sections.insert(4, migration_section)
@@ -1275,6 +1757,7 @@ def format_options_telegram_html(report: OptionsResearchReport, include_image: b
         f"View: <b>{html.escape(report.verdict)}</b>",
         f"Fair / Mkt: <code>{format_money(report.model.theoretical_value)} / {format_money(report.contract.market_price)}</code>",
         f"Gap: <code>{html.escape(format_pct(report.fair_value_gap_pct))}</code> ({html.escape(report.valuation_view)}) | IV/HV: <code>{html.escape(format_pct(report.implied_volatility_used))}/{html.escape(format_pct(report.historical_volatility))}</code>",
+        f"Context: <code>{html.escape(report.historical_volatility_status)}</code> HV from <code>{html.escape(report.historical_volatility_source)}</code>",
         "",
         html.escape(report.thesis[:360]),
         "",

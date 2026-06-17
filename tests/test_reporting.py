@@ -10,12 +10,19 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from quant_researcher_desk.reporting import (  # noqa: E402
+    REPORT_THEME,
     ReportRenderError,
     render_image_report,
     render_pdf_report,
     render_report_html,
     write_native_pdf_report,
     write_html_report,
+)
+from quant_researcher_desk.options_research import (  # noqa: E402
+    FixtureOptionsResearchProvider,
+    OptionsResearchRequest,
+    build_options_research_report,
+    options_report_sections,
 )
 
 
@@ -65,6 +72,36 @@ def test_render_report_html_escapes_text_and_renders_institutional_template() ->
     assert "ASML -> TSM" in html
     assert "<th>Sector</th>" in html
     assert "Semis" in html
+
+
+def test_report_theme_tokens_are_centralized_for_reuse() -> None:
+    assert REPORT_THEME["base"] == "#191414"
+    assert REPORT_THEME["accent"] == "#ff4632"
+    assert REPORT_THEME["heading_font"].startswith('"Poppins"')
+    assert REPORT_THEME["body_font"].startswith('"Inter"')
+
+
+def test_fixture_options_prospectus_renders_high_end_sections() -> None:
+    report = build_options_research_report(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(symbol="US.TEST", option_code="US.TEST260515C100000", strategy_gate_passed=True),
+    )
+
+    html = render_report_html(
+        "US.TEST Options Prospectus",
+        options_report_sections(report),
+        {"symbol": report.symbol, "verdict": report.verdict},
+    )
+
+    assert "US.TEST Options Prospectus" in html
+    assert "Desk View" in html
+    assert "Contract Snapshot" in html
+    assert "Post-Gate Strategy Comparison" in html
+    assert "Scenario Matrix" in html
+    assert "Risk Register" in html
+    assert "Verdict" in html
+    assert REPORT_THEME["base"] in html
+    assert REPORT_THEME["accent"] in html
 
 
 def test_render_report_html_supports_infographic_bar_charts() -> None:

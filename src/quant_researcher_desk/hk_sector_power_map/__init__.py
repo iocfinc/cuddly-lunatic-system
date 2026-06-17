@@ -11,4 +11,3 @@ from .finance import (  # noqa: F401
     finance_power_map_sections,
     format_hk_finance_telegram_html,
 )
-

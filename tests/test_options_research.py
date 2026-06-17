@@ -12,7 +12,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from quant_researcher_desk.options_research import (
     BlackScholesResult,
     FixtureOptionsResearchProvider,
+    HistoricalVolatilityContext,
     OptionsResearchRequest,
+    analyst_desk_note,
     black_scholes,
     build_options_research_report,
     format_options_telegram_html,
@@ -116,6 +118,52 @@ def test_build_options_research_report_uses_fixture_provider_and_scores_verdict(
     assert "holding window" in report.event_risk_summary.lower()
 
 
+def test_options_research_uses_provider_historical_volatility_context() -> None:
+    class HistoricalVolatilityProvider(FixtureOptionsResearchProvider):
+        def get_historical_volatility(self, symbol: str) -> HistoricalVolatilityContext:
+            return HistoricalVolatilityContext(
+                value=0.27,
+                source="fixture-hv",
+                status="fixture-backed",
+                summary=f"{symbol} fixture HV from daily bars.",
+                as_of="2026-04-27",
+            )
+
+    report = build_options_research_report(
+        HistoricalVolatilityProvider(),
+        OptionsResearchRequest(symbol="US.TEST", option_code="US.TEST260515C100000", historical_volatility=0.45),
+        now=dt.datetime(2026, 4, 28, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    sections = {str(section["title"]): section for section in options_report_sections(report)}
+
+    assert report.historical_volatility == pytest.approx(0.27)
+    assert report.historical_volatility_source == "fixture-hv"
+    assert report.historical_volatility_status == "fixture-backed"
+    assert "daily bars" in report.historical_volatility_summary
+    assert "Context Freshness" in sections
+    assert sections["Context Freshness"]["table"][1]["value"] == "fixture-hv"  # type: ignore[index]
+
+
+def test_options_research_marks_missing_historical_volatility_context() -> None:
+    class MissingHistoricalVolatilityProvider(FixtureOptionsResearchProvider):
+        def get_historical_volatility(self, symbol: str) -> HistoricalVolatilityContext:
+            raise RuntimeError(f"{symbol} daily bars unavailable")
+
+    report = build_options_research_report(
+        MissingHistoricalVolatilityProvider(),
+        OptionsResearchRequest(symbol="US.TEST", option_code="US.TEST260515C100000", historical_volatility=0.41),
+        now=dt.datetime(2026, 4, 28, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    message = format_options_telegram_html(report)
+
+    assert report.historical_volatility == pytest.approx(0.41)
+    assert report.historical_volatility_status == "missing"
+    assert "daily bars unavailable" in report.historical_volatility_summary
+    assert "missing" in message
+
+
 def test_options_report_sections_include_required_report_blocks() -> None:
     report = build_options_research_report(
         FixtureOptionsResearchProvider(),
@@ -133,6 +181,97 @@ def test_options_report_sections_include_required_report_blocks() -> None:
     assert sections["Scenario Matrix"]["table"][0]["price_shock"] == "-10.0%"  # type: ignore[index]
     assert "Tear Sheet Read" in sections
     assert "Verdict" in sections
+
+
+def test_options_research_suppresses_strategy_comparison_without_gate() -> None:
+    report = build_options_research_report(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(symbol="US.TEST", option_code="US.TEST260515C100000"),
+        now=dt.datetime(2026, 4, 28, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    sections = {str(section["title"]): section for section in options_report_sections(report)}
+
+    assert report.strategy_candidates == ()
+    assert "Post-Gate Strategy Comparison" not in sections
+
+
+def test_options_research_builds_post_gate_strategy_candidates() -> None:
+    report = build_options_research_report(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(
+            symbol="US.TEST",
+            option_code="US.TEST260515C100000",
+            strategy_gate_passed=True,
+            strategy_gate_reason="stock trend and liquidity gate passed",
+        ),
+        now=dt.datetime(2026, 4, 28, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    sections = {str(section["title"]): section for section in options_report_sections(report)}
+    strategy_names = {candidate.name for candidate in report.strategy_candidates}
+
+    assert report.strategy_gate_passed is True
+    assert "Long Call" in strategy_names
+    assert "Call Debit Spread" in strategy_names
+    assert "Covered Call" in strategy_names
+    assert "Cash-Secured Put" in strategy_names
+    assert all(candidate.net_debit >= 0 for candidate in report.strategy_candidates)
+    assert all(candidate.directional_assumption for candidate in report.strategy_candidates)
+    assert {candidate.context_freshness for candidate in report.strategy_candidates} == {"fixture-backed"}
+    assert "Post-Gate Strategy Comparison" in sections
+    assert "not execution instructions" in str(sections["Post-Gate Strategy Comparison"]["summary"])
+
+
+def test_options_research_can_represent_long_put_strategy_candidates() -> None:
+    report = build_options_research_report(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(
+            symbol="US.TEST",
+            option_code="US.TEST260515P095000",
+            strategy_gate_passed=True,
+            strategy_gate_reason="bearish fixture gate passed",
+        ),
+        now=dt.datetime(2026, 4, 28, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    strategy_names = {candidate.name for candidate in report.strategy_candidates}
+    long_put = next(candidate for candidate in report.strategy_candidates if candidate.name == "Long Put")
+
+    assert "Long Put" in strategy_names
+    assert "Cash-Secured Put" in strategy_names
+    assert long_put.directional_assumption == "bearish"
+
+
+def test_analyst_desk_note_follows_voice_rubric_and_cites_metrics() -> None:
+    report = build_options_research_report(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(symbol="US.TEST", option_code="US.TEST260515C100000"),
+        now=dt.datetime(2026, 4, 28, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    note = analyst_desk_note(report)
+
+    for label in ("Statement:", "Evidence:", "Interpretation:", "Risk:", "Verdict:"):
+        assert label in note
+    assert report.contract.code in note
+    assert "IV/HV" in note
+    assert "volume" in note
+    assert "open interest" in note
+    assert "Research output only, not a trading instruction." in note
+
+
+def test_analyst_desk_note_avoids_hype_and_trade_directives() -> None:
+    report = build_options_research_report(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(symbol="US.TEST", option_code="US.TEST260515C100000"),
+        now=dt.datetime(2026, 4, 28, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    note = analyst_desk_note(report).lower()
+
+    banned_phrases = ("buy now", "sure thing", "guaranteed", "moonshot", "must buy", "trading signal")
+    assert not any(phrase in note for phrase in banned_phrases)
 
 
 def test_options_research_defaults_event_risk_to_unknown_when_provider_has_no_event_method() -> None:

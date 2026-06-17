@@ -132,12 +132,13 @@ Implemented now:
 - QuantLib shadow-compare seam for closed-form pricing migration
 - fixture-backed US/HK sector value-chain tree reports
 - institutional HTML report rendering with optional PDF export through Playwright
+- tokenized report theme primitives through `REPORT_THEME`
+- local options journal persistence and outcome updates
 - unit tests for report formatting, ranking logic, and Telegram payloads
 
 Planned next:
 
 - real earnings, fundamentals, and sector relationship providers
-- journal persistence and outcome tracking
 - richer thesis and report generation
 
 ## Why It Exists
@@ -270,6 +271,8 @@ Live formatting smoke test:
 uv --cache-dir .uv-cache run python scripts/telegram_notify.py --post --parse-mode HTML $'<b>Quant Researcher Desk</b>\nTelegram formatting test'
 ```
 
+Telegram payloads are validated before network calls. Unsupported parse modes, captions above Telegram's document-caption limit, empty or missing documents, and unsupported photo file types fail locally instead of sending a partial notification.
+
 ## Moomoo OpenD Options Report
 
 The repository currently includes a working local options report flow powered by `moomoo-api` and Moomoo OpenD.
@@ -317,6 +320,30 @@ Enable the visual explainer and migration diagnostics when you want the teaching
 ```sh
 uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --dry-run --fixture --symbol US.TEST --report-format html --visual-explainer --shadow-compare --pricing-engine legacy
 ```
+
+Add post-gate strategy comparison only after the stock, tape, and product gate has passed:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --dry-run --fixture --symbol US.TEST --report-format html --strategy-gate-passed --strategy-gate-reason "fixture stock-first gate passed"
+```
+
+The comparison section is suppressed by default so weak or unmapped stock context cannot become a ranked strategy idea. When enabled, the report compares research-only structures such as long single-leg, debit spread, covered call, and cash-secured put candidates.
+
+Persist a local options journal entry without posting Telegram:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/send_options_research_report.py --dry-run --fixture --symbol US.TEST --report-format html --persist-journal --journal-dir reports/journal
+```
+
+The command prints a local reference in the form `journal: reports/journal/options-journal.json#<entry-id>`.
+
+Update an existing journal entry after the planned review window:
+
+```sh
+uv --cache-dir .uv-cache run python scripts/update_options_journal.py --entry-id <entry-id> --status inconclusive --lesson "Outcome stayed mixed after the planned review window." --underlying-price 101.5 --option-price 3.9
+```
+
+Outcome status values are `confirmed`, `invalidated`, and `inconclusive`.
 
 Use live Moomoo OpenD data by omitting `--fixture` after OpenD is running:
 

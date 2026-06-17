@@ -17,6 +17,11 @@ FIXTURE_UNDERLYINGS: dict[str, dict[str, float | str]] = {
     "US.AMD": {"company": "AMD", "spot": 162.0},
     "US.GOOGL": {"company": "Alphabet", "spot": 176.0},
     "US.TSM": {"company": "Taiwan Semiconductor", "spot": 168.0},
+    "US.LRCX": {"company": "Lam Research", "spot": 415.0},
+    "US.LLY": {"company": "Eli Lilly", "spot": 890.0},
+    "US.XOM": {"company": "Exxon Mobil", "spot": 112.0},
+    "US.CVX": {"company": "Chevron", "spot": 154.0},
+    "US.KLAC": {"company": "KLA", "spot": 865.0},
     "US.NOOPT": {"company": "No Options Co", "spot": 88.0},
     "US.TEST": {"company": "Test Fixture", "spot": 100.0},
 }
@@ -31,6 +36,11 @@ FIXTURE_TREND_REGIMES: dict[str, str] = {
     "US.AMD": "bullish",
     "US.GOOGL": "bearish",
     "US.TSM": "bullish",
+    "US.LRCX": "bullish",
+    "US.LLY": "bullish",
+    "US.XOM": "mixed",
+    "US.CVX": "mixed",
+    "US.KLAC": "bullish",
     "US.NOOPT": "bullish",
     "US.TEST": "bullish",
 }

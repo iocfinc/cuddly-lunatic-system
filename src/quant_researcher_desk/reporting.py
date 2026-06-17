@@ -17,6 +17,23 @@ class ReportRenderError(Exception):
     """Raised when a requested report format cannot be rendered."""
 
 
+REPORT_THEME = {
+    "base": "#191414",
+    "panel": "#241f1d",
+    "panel_2": "#302927",
+    "ink": "#f7f4f2",
+    "muted": "#a8a29e",
+    "line": "#4a403c",
+    "accent": "#ff4632",
+    "positive": "#2ecc71",
+    "risk": "#e74c3c",
+    "watch": "#f39c12",
+    "heading_font": '"Poppins", "Inter", sans-serif',
+    "body_font": '"Inter", "Aptos", "Segoe UI", sans-serif',
+    "radius": "8px",
+}
+
+
 def _escape(value: Any) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
@@ -615,20 +632,25 @@ def write_native_pdf_report(
 
 
 def _stylesheet() -> str:
-    return """
-:root {
-  --base: #191414;
-  --panel: #241f1d;
-  --panel-2: #302927;
-  --ink: #f7f4f2;
-  --muted: #a8a29e;
-  --line: #4a403c;
-  --accent: #ff4632;
-  --accent-soft: rgba(255, 70, 50, 0.14);
-  --positive: #2ecc71;
-  --risk: #e74c3c;
-  --watch: #f39c12;
-}
+    token_lines = [
+        ":root {",
+        f"  --base: {REPORT_THEME['base']};",
+        f"  --panel: {REPORT_THEME['panel']};",
+        f"  --panel-2: {REPORT_THEME['panel_2']};",
+        f"  --ink: {REPORT_THEME['ink']};",
+        f"  --muted: {REPORT_THEME['muted']};",
+        f"  --line: {REPORT_THEME['line']};",
+        f"  --accent: {REPORT_THEME['accent']};",
+        "  --accent-soft: rgba(255, 70, 50, 0.14);",
+        f"  --positive: {REPORT_THEME['positive']};",
+        f"  --risk: {REPORT_THEME['risk']};",
+        f"  --watch: {REPORT_THEME['watch']};",
+        f"  --heading-font: {REPORT_THEME['heading_font']};",
+        f"  --body-font: {REPORT_THEME['body_font']};",
+        f"  --radius: {REPORT_THEME['radius']};",
+        "}",
+    ]
+    return "\n".join(token_lines) + """
 @page {
   size: A4;
   margin: 16mm 13mm;
@@ -638,7 +660,7 @@ body {
   margin: 0;
   background: #111;
   color: var(--ink);
-  font-family: "Inter", "Aptos", "Segoe UI", sans-serif;
+  font-family: var(--body-font);
   line-height: 1.55;
 }
 .page {
@@ -649,7 +671,7 @@ body {
 }
 .hero {
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   background: linear-gradient(145deg, rgba(48,41,39,0.96), rgba(25,20,20,0.92));
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.32);
   padding: 34px;
@@ -664,7 +686,7 @@ body {
   text-transform: uppercase;
 }
 h1 {
-  font-family: "Poppins", "Inter", sans-serif;
+  font-family: var(--heading-font);
   font-size: clamp(42px, 7vw, 76px);
   line-height: 0.96;
   margin: 16px 0 0;
@@ -680,7 +702,7 @@ h1 {
 .meta-card {
   background: rgba(36, 31, 29, 0.78);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   padding: 16px;
 }
 .meta-label {
@@ -699,7 +721,7 @@ h1 {
 .report-section {
   background: rgba(36, 31, 29, 0.88);
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--radius);
   margin-top: 22px;
   padding: 30px;
   page-break-inside: avoid;
@@ -718,7 +740,7 @@ h1 {
   padding: 6px 10px;
 }
 h2 {
-  font-family: "Poppins", "Inter", sans-serif;
+  font-family: var(--heading-font);
   font-size: 30px;
   margin: 14px 0;
 }
