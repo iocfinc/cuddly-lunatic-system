@@ -26,19 +26,40 @@ snapshots/
 .com.moomoo.OpenD/
 
 # Local agentic-stack runtime state
-.cache/
-.codex/
 .agent/
 .agents/
 .agentic/
 agentic-stack/
 agentic-stack.log
+
+# Local tool and MCP runtime state
+.cache/
 .npm/
 .playwright-mcp/
 .symphony-workspaces/
 .tradingagents/
 .understand-anything/
 Library/
+
+# Repo-local Codex state
+.codex/*
+!.codex/config.toml
+
+# Local agent configs and launchers
+agents/
+launchd/
+
+# Internal research and planning artifacts
+internal-notes/*
+!internal-notes/PRD.md
+!internal-notes/acceptance-criteria-QA.md
+!internal-notes/design-branding.md
+!internal-notes/product-portfolio.md
+!internal-notes/tradingagents-adoption.md
+
+# Generated docs and explainer media
+docs/assets/
+docs/*.html
 
 # OS/editor noise
 .DS_Store
