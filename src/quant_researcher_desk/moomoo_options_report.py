@@ -5,18 +5,79 @@ from __future__ import annotations
 import datetime as dt
 import html
 import math
+import re
 import socket
+import time
+from collections import deque
 from dataclasses import dataclass
-from typing import Any, Iterable, Protocol
+from typing import Any, Callable, Iterable, Protocol
 
 
 RET_OK_VALUE = 0
 DEFAULT_BATCH_SIZE = 400
+DEFAULT_OPTION_CHAIN_RATE_LIMIT = 10
+DEFAULT_OPTION_CHAIN_RATE_WINDOW_SECONDS = 30.0
+DEFAULT_RATE_LIMIT_BUFFER_SECONDS = 0.25
 RISK_NOTE = "Research output only, not a trading instruction."
+_HIGH_FREQUENCY_PATTERN = re.compile(r"maximum\s+\d+\s+times\s+per\s+(\d+(?:\.\d+)?)\s+seconds?", re.IGNORECASE)
 
 
 class OptionsReportError(Exception):
     """Raised when the options report cannot be built."""
+
+
+class SlidingWindowRateLimiter:
+    """Client-side guard for OpenD endpoints with fixed-window burst quotas."""
+
+    def __init__(
+        self,
+        *,
+        max_calls: int,
+        window_seconds: float,
+        buffer_seconds: float = DEFAULT_RATE_LIMIT_BUFFER_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        sleeper: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if max_calls < 1:
+            raise ValueError("max_calls must be at least 1")
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        self.max_calls = max_calls
+        self.window_seconds = window_seconds
+        self.buffer_seconds = buffer_seconds
+        self.clock = clock
+        self.sleeper = sleeper
+        self._calls: deque[float] = deque()
+
+    def wait(self) -> None:
+        now = self.clock()
+        self._evict_expired(now)
+        if len(self._calls) >= self.max_calls:
+            sleep_for = max(0.0, self._calls[0] + self.window_seconds - now + self.buffer_seconds)
+            if sleep_for > 0:
+                self.sleeper(sleep_for)
+            now = self.clock()
+            self._evict_expired(now)
+        self._calls.append(now)
+
+    def reset(self) -> None:
+        self._calls.clear()
+
+    def _evict_expired(self, now: float) -> None:
+        cutoff = now - self.window_seconds
+        while self._calls and self._calls[0] <= cutoff:
+            self._calls.popleft()
+
+
+def is_opend_high_frequency_error(data: Any) -> bool:
+    return "high frequency" in str(data).lower()
+
+
+def opend_high_frequency_window_seconds(data: Any) -> float:
+    match = _HIGH_FREQUENCY_PATTERN.search(str(data))
+    if match is None:
+        return DEFAULT_OPTION_CHAIN_RATE_WINDOW_SECONDS
+    return float(match.group(1))
 
 
 class QuoteClient(Protocol):
@@ -444,12 +505,29 @@ def format_telegram_html(report: OptionsReport) -> str:
 class MoomooOpenDQuoteClient:
     """Small wrapper around the moomoo OpenD quote context."""
 
-    def __init__(self, host: str = "127.0.0.1", port: int = 11111, batch_size: int = DEFAULT_BATCH_SIZE) -> None:
+    def __init__(
+        self,
+        host: str = "127.0.0.1",
+        port: int = 11111,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        *,
+        option_chain_rate_limit: int = DEFAULT_OPTION_CHAIN_RATE_LIMIT,
+        option_chain_rate_window_seconds: float = DEFAULT_OPTION_CHAIN_RATE_WINDOW_SECONDS,
+        rate_limit_clock: Callable[[], float] = time.monotonic,
+        rate_limit_sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
         self.host = host
         self.port = port
         self.batch_size = batch_size
         self._ctx: Any = None
         self._ret_ok: Any = RET_OK_VALUE
+        self._rate_limit_sleep = rate_limit_sleep
+        self._option_chain_limiter = SlidingWindowRateLimiter(
+            max_calls=option_chain_rate_limit,
+            window_seconds=option_chain_rate_window_seconds,
+            clock=rate_limit_clock,
+            sleeper=rate_limit_sleep,
+        )
 
     def __enter__(self) -> "MoomooOpenDQuoteClient":
         self.connect()
@@ -501,7 +579,14 @@ class MoomooOpenDQuoteClient:
         return expiries
 
     def get_option_chain(self, symbol: str, expiry: str) -> list[dict[str, Any]]:
+        self._option_chain_limiter.wait()
         ret, data = self.ctx.get_option_chain(symbol, start=expiry, end=expiry)
+        if ret != self._ret_ok and is_opend_high_frequency_error(data):
+            retry_after = opend_high_frequency_window_seconds(data) + DEFAULT_RATE_LIMIT_BUFFER_SECONDS
+            self._rate_limit_sleep(retry_after)
+            self._option_chain_limiter.reset()
+            self._option_chain_limiter.wait()
+            ret, data = self.ctx.get_option_chain(symbol, start=expiry, end=expiry)
         return normalize_records(self.check_ret(ret, data, "get option chain"))
 
     def get_market_snapshots(self, codes: list[str]) -> list[dict[str, Any]]:

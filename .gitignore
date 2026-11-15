@@ -56,6 +56,10 @@ internal-notes/*
 !internal-notes/design-branding.md
 !internal-notes/product-portfolio.md
 !internal-notes/tradingagents-adoption.md
+!internal-notes/features/
+internal-notes/features/*
+!internal-notes/features/options-catalyst-product-map/
+!internal-notes/features/options-catalyst-product-map/**
 
 # Generated docs and explainer media
 docs/assets/

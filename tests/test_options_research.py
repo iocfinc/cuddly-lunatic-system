@@ -11,15 +11,20 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from quant_researcher_desk.options_research import (
     BlackScholesResult,
+    ContractVettingPolicy,
     FixtureOptionsResearchProvider,
     HistoricalVolatilityContext,
+    OptionContract,
     OptionsResearchRequest,
     analyst_desk_note,
     black_scholes,
     build_options_research_report,
+    filter_vetted_contracts,
     format_options_telegram_html,
     implied_volatility,
     options_report_sections,
+    research_report_is_screenable,
+    vet_option_contract,
 )
 
 
@@ -94,6 +99,32 @@ def test_implied_volatility_solves_back_to_reference_vol() -> None:
     solved = implied_volatility("PUT", market_price=market_price, spot=100, strike=95, years=0.5, risk_free_rate=0.04)
 
     assert solved == pytest.approx(0.32, abs=0.0001)
+
+
+def test_contract_vetting_policy_rejects_unusable_contracts_with_reason_codes() -> None:
+    policy = ContractVettingPolicy(min_volume=100, min_open_interest=100, min_abs_delta=0.20, max_abs_delta=0.60)
+    good = OptionContract("US.TEST260515C100000", "CALL", 100.0, "2026-05-15", 4.2, 0.32, 0.42, 500, 200)
+    low_volume = OptionContract("US.TEST260515C105000", "CALL", 105.0, "2026-05-15", 2.1, 0.34, 0.34, 500, 25)
+    low_oi = OptionContract("US.TEST260515C110000", "CALL", 110.0, "2026-05-15", 1.5, 0.35, 0.30, 25, 200)
+    zero_premium = OptionContract("US.TEST260515C115000", "CALL", 115.0, "2026-05-15", 0.0, 0.35, 0.25, 500, 200)
+    bad_delta = OptionContract("US.TEST260515C120000", "CALL", 120.0, "2026-05-15", 0.8, 0.36, 0.08, 500, 200)
+
+    assert vet_option_contract(good, policy).passed is True
+    assert vet_option_contract(low_volume, policy).reason_codes == ("low_volume",)
+    assert vet_option_contract(low_oi, policy).reason_codes == ("low_open_interest",)
+    assert vet_option_contract(zero_premium, policy).reason_codes == ("nonpositive_premium",)
+    assert vet_option_contract(bad_delta, policy).reason_codes == ("delta_outside_band",)
+    assert filter_vetted_contracts([good, low_volume, low_oi, zero_premium, bad_delta], policy) == (good,)
+
+
+def test_contract_vetting_rejects_strikes_out_of_reality_against_underlying() -> None:
+    stale_split_call = OptionContract("US.KLAC260624C865000", "CALL", 865.0, "2026-06-24", 10.38, 0.26, 0.52, 2908, 1773)
+
+    result = vet_option_contract(stale_split_call, underlying_price=238.73)
+
+    assert result.passed is False
+    assert result.reason_codes == ("strike_outside_underlying_band",)
+    assert not filter_vetted_contracts([stale_split_call], underlying_price=238.73)
 
 
 def test_build_options_research_report_uses_fixture_provider_and_scores_verdict() -> None:

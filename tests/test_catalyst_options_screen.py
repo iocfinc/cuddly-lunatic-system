@@ -34,9 +34,9 @@ class FakeCatalystClient:
         rows = []
         for code in codes:
             if code.endswith("C105"):
-                rows.append({"code": code, "last_price": 2.2, "implied_volatility": 0.55, "delta": 0.35, "open_interest": 1200, "volume": 800})
+                rows.append({"code": code, "last_price": 1.2, "implied_volatility": 0.35, "delta": 0.35, "open_interest": 1200, "volume": 800})
             else:
-                rows.append({"code": code, "last_price": 1.9, "implied_volatility": 0.58, "delta": -0.30, "open_interest": 900, "volume": 500})
+                rows.append({"code": code, "last_price": 1.1, "implied_volatility": 0.35, "delta": -0.30, "open_interest": 900, "volume": 500})
         return rows
 
     def get_daily_bars(self, symbol: str, count: int = 250) -> list[dict[str, object]]:
@@ -71,6 +71,35 @@ class MixedTrendCatalystClient(FakeCatalystClient):
         ]
 
 
+class PricingRejectedCatalystClient(FakeCatalystClient):
+    def get_market_snapshots(self, codes: list[str]) -> list[dict[str, object]]:
+        rows = []
+        for code in codes:
+            if code.endswith("C105"):
+                rows.append({"code": code, "last_price": 20.0, "implied_volatility": 1.10, "delta": 0.35, "open_interest": 1200, "volume": 800})
+            else:
+                rows.append({"code": code, "last_price": 20.0, "implied_volatility": 1.10, "delta": -0.30, "open_interest": 900, "volume": 500})
+        return rows
+
+
+class StaleSplitCatalystClient(FakeCatalystClient):
+    def get_underlying_snapshot(self, symbol: str) -> dict[str, object]:
+        return {"code": symbol, "last_price": 238.73}
+
+    def get_option_expirations(self, symbol: str) -> list[str]:
+        return ["2026-06-24", "2026-07-01"]
+
+    def get_option_chain(self, symbol: str, expiry: str) -> list[dict[str, object]]:
+        return [
+            {"code": f"{symbol}260624C865000", "option_type": "CALL", "strike_price": 865.0, "strike_time": expiry},
+        ]
+
+    def get_market_snapshots(self, codes: list[str]) -> list[dict[str, object]]:
+        return [
+            {"code": codes[0], "last_price": 10.38, "implied_volatility": 0.26, "delta": 0.52, "open_interest": 2908, "volume": 1773},
+        ]
+
+
 def test_build_catalyst_options_screen_runs_stock_first_and_keeps_only_aligned_side() -> None:
     candidates = (
         CatalystCandidate("US.TEST", "Test Co", "Mapped earnings watch", UNVERIFIED_TIMING_NOTE, "Use readable delta."),
@@ -89,6 +118,9 @@ def test_build_catalyst_options_screen_runs_stock_first_and_keeps_only_aligned_s
     assert report.ideas[0].expiry == "2026-05-06"
     assert report.ideas[0].review_level == "Priority Review"
     assert report.ideas[0].stock_direction == "bullish"
+    assert report.ideas[0].strategy_verdict == "selected"
+    assert report.ideas[0].strategy_structure
+    assert report.ideas[0].strategy_max_loss > 0
     assert report.assessments[0].timing.startswith("2026-05-12")
     assert report.minimum_days_out == 5
     assert report.target_days_out == 7
@@ -112,6 +144,8 @@ def test_catalyst_report_sections_include_learning_corner_and_ranked_table() -> 
     assert "stock has a clean bullish or bearish regime" in str(sections["Learning Corner"]["content"])
     assert "conditional watch bucket" in str(sections["Learning Corner"]["content"])
     assert sections["Ranked Option Ideas"]["table"][0]["symbol"] == "TEST"  # type: ignore[index]
+    assert sections["Ranked Option Ideas"]["table"][0]["strategy"]  # type: ignore[index]
+    assert sections["Ranked Option Ideas"]["table"][0]["strategy_verdict"] == "selected"  # type: ignore[index]
     assert sections["Catalyst Watchlist Status"]["table"][0]["review_level"] == "Priority Review"  # type: ignore[index]
 
 
@@ -133,7 +167,7 @@ def test_format_catalyst_telegram_html_is_one_compact_message() -> None:
     assert "PDF attached" in message
 
 
-def test_build_catalyst_options_screen_skips_mixed_regimes_instead_of_forcing_countertrend() -> None:
+def test_build_catalyst_options_screen_can_rank_mixed_regime_event_contracts() -> None:
     candidates = (
         CatalystCandidate("US.TEST", "Test Co", "Mapped earnings watch", UNVERIFIED_TIMING_NOTE, "Use readable delta."),
     )
@@ -144,10 +178,42 @@ def test_build_catalyst_options_screen_skips_mixed_regimes_instead_of_forcing_co
         now=dt.datetime(2026, 4, 29, 9, 30, tzinfo=dt.timezone.utc),
     )
 
+    assert len(report.ideas) == 1
+    assert report.ideas[0].stock_direction == "no_trade"
+    assert "Mixed stock regime" in report.assessments[0].note
+    assert not report.skipped
+
+
+def test_catalyst_screen_does_not_emit_pricing_rejected_contracts() -> None:
+    candidates = (
+        CatalystCandidate("US.TEST", "Test Co", "Mapped earnings watch", UNVERIFIED_TIMING_NOTE, "Use readable delta."),
+    )
+
+    report = build_catalyst_options_screen(
+        PricingRejectedCatalystClient(),
+        candidates,
+        now=dt.datetime(2026, 4, 29, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
     assert not report.ideas
     assert report.assessments[0].review_level == "Pass"
-    assert report.assessments[0].top_option == "Skip mixed or unresolved stock regime"
-    assert "stock-first gate blocked" in report.skipped[0]
+    assert "strategy router" in report.skipped[0]
+
+
+def test_catalyst_screen_rejects_stale_split_strikes_against_live_underlying() -> None:
+    candidates = (
+        CatalystCandidate("US.KLAC", "KLA", "Mapped earnings watch", UNVERIFIED_TIMING_NOTE, "Use readable delta."),
+    )
+
+    report = build_catalyst_options_screen(
+        StaleSplitCatalystClient(),
+        candidates,
+        now=dt.datetime(2026, 6, 18, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    assert not report.ideas
+    assert report.assessments[0].top_option == "No aligned liquid candidate"
+    assert "strike_outside_underlying_band" in report.skipped[0]
 
 
 def test_default_candidates_use_unverified_timing_note_instead_of_historical_labels() -> None:

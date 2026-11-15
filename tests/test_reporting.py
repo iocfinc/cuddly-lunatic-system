@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import datetime as dt
 import pathlib
 import sys
 
@@ -85,6 +86,7 @@ def test_fixture_options_prospectus_renders_high_end_sections() -> None:
     report = build_options_research_report(
         FixtureOptionsResearchProvider(),
         OptionsResearchRequest(symbol="US.TEST", option_code="US.TEST260515C100000", strategy_gate_passed=True),
+        now=dt.datetime(2026, 5, 1, 9, 30, tzinfo=dt.timezone.utc),
     )
 
     html = render_report_html(

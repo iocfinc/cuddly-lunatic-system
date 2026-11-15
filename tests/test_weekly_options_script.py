@@ -67,6 +67,31 @@ def test_weekly_options_screen_script_fixture_writes_csv_json_and_html(tmp_path:
     assert payload["skipped_symbols"]
 
 
+def test_weekly_options_screen_script_accepts_explicit_symbols(tmp_path: pathlib.Path) -> None:
+    result = run_script(
+        "scripts/run_weekly_options_screen.py",
+        "--fixture",
+        "--symbols",
+        "AAPL,MSFT,DRAM",
+        "--top-n",
+        "4",
+        "--report-format",
+        "html",
+        "--output-dir",
+        str(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "explicit-symbols: 3" in result.stdout
+
+    json_files = list(tmp_path.glob("*-weekly-shortlist.json"))
+    assert json_files
+    payload = json.loads(json_files[0].read_text(encoding="utf-8"))
+    assert payload["request"]["explicit_symbols"] == ["AAPL", "MSFT", "DRAM"]
+    assert [candidate["symbol"] for candidate in payload["universe"]] == ["US.AAPL", "US.MSFT", "US.DRAM"]
+    assert payload["discovery_stats"]["explicit_symbols"] == 3
+
+
 def test_weekly_options_screen_script_can_review_shortlist_and_emit_reviewer_fields(tmp_path: pathlib.Path) -> None:
     result = run_script(
         "scripts/run_weekly_options_screen.py",

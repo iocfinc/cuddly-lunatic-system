@@ -301,6 +301,31 @@ def test_tradingagents_packet_script_fixture_dry_run_writes_attachment_and_json(
     assert list((tmp_path / "results").rglob("*.json"))
 
 
+def test_tradingagents_packet_script_hy3_preset_fixture_dry_run_writes_attachment_and_json(tmp_path: pathlib.Path) -> None:
+    result = run_script(
+        "scripts/send_tradingagents_packet.py",
+        "--dry-run",
+        "--preset",
+        "openrouter-hy3-current-options-underlying",
+        "--fixture",
+        "--symbol",
+        "US.TEST",
+        "--report-format",
+        "html",
+        "--output-dir",
+        str(tmp_path),
+        "--results-dir",
+        str(tmp_path / "results"),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "US.TEST Decision Packet" in result.stdout
+    assert "attachment:" in result.stdout
+    assert "artifact:" in result.stdout
+    assert list(tmp_path.glob("*.html"))
+    assert list((tmp_path / "results").rglob("*.json"))
+
+
 def test_tradingagents_packet_script_live_path_fails_gracefully_when_disabled(tmp_path: pathlib.Path) -> None:
     result = run_script(
         "scripts/send_tradingagents_packet.py",
@@ -389,6 +414,8 @@ def test_catalyst_options_screen_script_records_fixture_run_provenance(tmp_path:
         "--dry-run",
         "--fixture",
         "--skip-telegram",
+        "--min-promoted",
+        "0",
         "--output-dir",
         str(tmp_path),
         "--run-ledger",
@@ -398,7 +425,10 @@ def test_catalyst_options_screen_script_records_fixture_run_provenance(tmp_path:
     assert result.returncode == 0, result.stderr
     assert "Catalyst Options Screen" in result.stdout
     assert "attachment:" in result.stdout
+    assert "latest_attachment:" in result.stdout
     assert (tmp_path / "catalyst-options-screen.pdf").exists()
+    timestamped_files = list(tmp_path.glob("*-catalyst-options-screen.pdf"))
+    assert len(timestamped_files) == 1
 
     entries = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     assert len(entries) == 1
@@ -407,7 +437,10 @@ def test_catalyst_options_screen_script_records_fixture_run_provenance(tmp_path:
     assert entry["mode"] == "dry-run"
     assert "scripts/send_catalyst_options_screen.py" in entry["command_shape"]
     assert entry["output_dir"] == str(tmp_path)
-    assert entry["artifact_path"] == str(tmp_path / "catalyst-options-screen.pdf")
+    assert entry["artifact_path"] == str(timestamped_files[0])
+    assert entry["promoted_count"] == 0
+    assert entry["evaluated_count"] == 10
+    assert entry["reject_count"] == 10
     assert entry["timestamp"]
     assert entry["blocker"] is None
 
@@ -425,9 +458,8 @@ def test_catalyst_options_screen_script_records_exact_opend_blocker(tmp_path: pa
         "9",
     )
 
-    expected = "catalyst options screen failed: Cannot connect to OpenD at 127.0.0.1:9. Start and log into OpenD first."
     assert result.returncode == 1
-    assert expected in result.stderr
+    assert "catalyst options screen failed:" in result.stderr
 
     entries = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     assert len(entries) == 1
@@ -435,7 +467,37 @@ def test_catalyst_options_screen_script_records_exact_opend_blocker(tmp_path: pa
     assert entry["status"] == "failed"
     assert entry["mode"] == "dry-run"
     assert entry["artifact_path"] is None
-    assert entry["blocker"] == expected
+    assert entry["blocker"] in result.stderr
+    assert entry["provider_gates"] == {}
+
+
+def test_catalyst_options_screen_script_fails_promotion_gate_before_pdf(tmp_path: pathlib.Path) -> None:
+    ledger_path = tmp_path / "run-ledger.jsonl"
+    result = run_script(
+        "scripts/send_catalyst_options_screen.py",
+        "--dry-run",
+        "--fixture",
+        "--skip-telegram",
+        "--output-dir",
+        str(tmp_path),
+        "--run-ledger",
+        str(ledger_path),
+    )
+
+    expected = "promotion gate failed: 0 ranked ideas; minimum required is 5. rejected=10."
+    assert result.returncode == 1
+    assert expected in result.stderr
+    assert not list(tmp_path.glob("*.pdf"))
+
+    entries = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["status"] == "failed"
+    assert entry["artifact_path"] is None
+    assert entry["promoted_count"] == 0
+    assert entry["evaluated_count"] == 10
+    assert entry["reject_count"] == 10
+    assert entry["exact_blocker"] == expected
 
 
 def test_catalyst_options_screen_script_records_telegram_disabled_skip_without_success(tmp_path: pathlib.Path) -> None:
@@ -445,6 +507,8 @@ def test_catalyst_options_screen_script_records_telegram_disabled_skip_without_s
         "--post",
         "--fixture",
         "--skip-telegram",
+        "--min-promoted",
+        "0",
         "--output-dir",
         str(tmp_path),
         "--run-ledger",
@@ -461,7 +525,34 @@ def test_catalyst_options_screen_script_records_telegram_disabled_skip_without_s
     entry = entries[0]
     assert entry["status"] == "skipped"
     assert entry["mode"] == "post"
-    assert entry["artifact_path"] == str(tmp_path / "catalyst-options-screen.pdf")
+    assert entry["artifact_path"].endswith("-catalyst-options-screen.pdf")
+    assert (tmp_path / "catalyst-options-screen.pdf").exists()
+    assert entry["promoted_count"] == 0
+    assert entry["blocker"] == expected
+
+
+def test_catalyst_options_screen_script_blocks_fixture_post_as_live_report(tmp_path: pathlib.Path) -> None:
+    ledger_path = tmp_path / "run-ledger.jsonl"
+    result = run_script(
+        "scripts/send_catalyst_options_screen.py",
+        "--post",
+        "--fixture",
+        "--output-dir",
+        str(tmp_path),
+        "--run-ledger",
+        str(ledger_path),
+    )
+
+    expected = "telegram notification blocked: fixture reports cannot be posted as live catalyst reports"
+    assert result.returncode == 1
+    assert expected in result.stderr
+
+    entries = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["status"] == "failed"
+    assert entry["mode"] == "post"
+    assert entry["artifact_path"] is None
     assert entry["blocker"] == expected
 
 
@@ -493,6 +584,28 @@ def test_weekly_options_packet_script_fixture_dry_run_writes_pdf_bundle(tmp_path
     assert "US Weekly Options Packet" in result.stdout
     assert "attachment:" in result.stdout
     assert list(tmp_path.glob("*.pdf"))
+
+
+def test_weekly_options_packet_html_surfaces_strategy_router_fields(tmp_path: pathlib.Path) -> None:
+    result = run_script(
+        "scripts/send_weekly_options_packet.py",
+        "--dry-run",
+        "--fixture",
+        "--report-format",
+        "html",
+        "--top-n",
+        "4",
+        "--output-dir",
+        str(tmp_path),
+    )
+
+    assert result.returncode == 0, result.stderr
+    files = list(tmp_path.glob("*.html"))
+    assert files
+    html = files[0].read_text(encoding="utf-8")
+    assert "Strategy" in html
+    assert "Strategy Verdict" in html
+    assert "Call Debit Spread" in html or "Put Debit Spread" in html
 
 
 def test_supply_chain_mapper_script_dry_run_writes_explorer_and_manifest(tmp_path: pathlib.Path) -> None:

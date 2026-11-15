@@ -17,6 +17,10 @@ FIXTURE_UNDERLYINGS: dict[str, dict[str, float | str]] = {
     "US.AMD": {"company": "AMD", "spot": 162.0},
     "US.GOOGL": {"company": "Alphabet", "spot": 176.0},
     "US.TSM": {"company": "Taiwan Semiconductor", "spot": 168.0},
+    "US.DRAM": {"company": "DRAM ETF", "spot": 29.0},
+    "US.SMH": {"company": "VanEck Semiconductor ETF", "spot": 285.0},
+    "US.MU": {"company": "Micron Technology", "spot": 155.0},
+    "US.SNDK": {"company": "SanDisk", "spot": 78.0},
     "US.LRCX": {"company": "Lam Research", "spot": 415.0},
     "US.LLY": {"company": "Eli Lilly", "spot": 890.0},
     "US.XOM": {"company": "Exxon Mobil", "spot": 112.0},
@@ -36,6 +40,10 @@ FIXTURE_TREND_REGIMES: dict[str, str] = {
     "US.AMD": "bullish",
     "US.GOOGL": "bearish",
     "US.TSM": "bullish",
+    "US.DRAM": "bullish",
+    "US.SMH": "bullish",
+    "US.MU": "bullish",
+    "US.SNDK": "bullish",
     "US.LRCX": "bullish",
     "US.LLY": "bullish",
     "US.XOM": "mixed",
@@ -74,7 +82,12 @@ _OPTION_CODE_RE = re.compile(
 
 
 def fixture_expiries(anchor_date: dt.date) -> list[str]:
-    return [(anchor_date + dt.timedelta(days=7)).isoformat(), (anchor_date + dt.timedelta(days=14)).isoformat()]
+    return [
+        (anchor_date + dt.timedelta(days=7)).isoformat(),
+        (anchor_date + dt.timedelta(days=14)).isoformat(),
+        (anchor_date + dt.timedelta(days=35)).isoformat(),
+        (anchor_date + dt.timedelta(days=42)).isoformat(),
+    ]
 
 
 def fixture_chain_expiry(anchor_date: dt.date) -> str:

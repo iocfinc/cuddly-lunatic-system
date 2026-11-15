@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import pathlib
 import sys
@@ -45,8 +46,9 @@ def main() -> int:
 
     try:
         if args.fixture:
-            provider = FixtureCatalystOptionsProvider()
-            report = build_catalyst_options_screen(provider, DEFAULT_CANDIDATES)
+            now = dt.datetime.combine(dt.date(2026, 6, 17), dt.time(9, 30), tzinfo=dt.timezone.utc)
+            provider = FixtureCatalystOptionsProvider(anchor_date=now.date())
+            report = build_catalyst_options_screen(provider, DEFAULT_CANDIDATES, now=now)
         else:
             with MoomooOpenDQuoteClient(host=args.opend_host, port=args.opend_port) as client:
                 report = build_catalyst_options_screen(client, DEFAULT_CANDIDATES)

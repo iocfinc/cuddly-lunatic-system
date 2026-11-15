@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from quant_researcher_desk.moomoo_options_report import (  # noqa: E402
     MoomooOpenDQuoteClient,
+    OptionsReportError,
     RISK_NOTE,
     build_options_report,
     format_telegram_html,
@@ -109,6 +110,7 @@ def test_telegram_html_escapes_text_and_includes_required_fields() -> None:
 class FakeOpenDContext:
     def __init__(self) -> None:
         self.closed = False
+        self.option_chain_calls: list[tuple[str, str, str]] = []
 
     def get_plate_list(self, market: object, plate_class: object) -> tuple[int, list[dict[str, object]]]:
         assert market is not None
@@ -125,8 +127,39 @@ class FakeOpenDContext:
             {"code": "US.MSFT", "stock_name": "Microsoft"},
         ]
 
+    def get_option_chain(self, symbol: str, start: str, end: str) -> tuple[int, list[dict[str, object]]]:
+        self.option_chain_calls.append((symbol, start, end))
+        return 0, [{"code": f"{symbol}260626C100000", "strike_time": start}]
+
     def close(self) -> None:
         self.closed = True
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class HighFrequencyThenOkContext:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def get_option_chain(self, symbol: str, start: str, end: str) -> tuple[int, object]:
+        self.calls += 1
+        if self.calls == 1:
+            return 1, "Get Option Chain request failed due to high frequency. Maximum 10 times per 30 seconds."
+        return 0, [{"code": f"{symbol}260626C100000", "strike_time": start}]
+
+    def close(self) -> None:
+        pass
 
 
 def test_normalize_records_handles_sequence_payloads() -> None:
@@ -144,6 +177,57 @@ def test_opend_quote_client_plate_helpers_normalize_rows_without_live_socket() -
 
     assert [row["code"] for row in plates] == ["US.TECH", "US.MEGA"]
     assert [row["code"] for row in constituents] == ["US.NVDA", "US.MSFT"]
+
+
+def test_opend_quote_client_throttles_option_chain_bursts_without_live_socket() -> None:
+    clock = FakeClock()
+    client = MoomooOpenDQuoteClient(
+        option_chain_rate_limit=2,
+        option_chain_rate_window_seconds=30,
+        rate_limit_clock=clock.monotonic,
+        rate_limit_sleep=clock.sleep,
+    )
+    client._ctx = FakeOpenDContext()
+
+    client.get_option_chain("US.AAPL", "2026-06-26")
+    client.get_option_chain("US.MSFT", "2026-06-26")
+    client.get_option_chain("US.NVDA", "2026-06-26")
+
+    assert clock.sleeps == [30.25]
+    assert len(client._ctx.option_chain_calls) == 3
+
+
+def test_opend_quote_client_recovers_once_when_provider_window_is_already_hot() -> None:
+    clock = FakeClock()
+    client = MoomooOpenDQuoteClient(rate_limit_clock=clock.monotonic, rate_limit_sleep=clock.sleep)
+    client._ctx = HighFrequencyThenOkContext()
+
+    rows = client.get_option_chain("US.AAPL", "2026-06-26")
+
+    assert rows == [{"code": "US.AAPL260626C100000", "strike_time": "2026-06-26"}]
+    assert clock.sleeps == [30.25]
+    assert client._ctx.calls == 2
+
+
+def test_opend_quote_client_preserves_high_frequency_error_after_retry_failure() -> None:
+    class AlwaysRateLimitedContext:
+        def get_option_chain(self, symbol: str, start: str, end: str) -> tuple[int, str]:
+            return 1, "Get Option Chain request failed due to high frequency. Maximum 10 times per 30 seconds."
+
+    clock = FakeClock()
+    client = MoomooOpenDQuoteClient(rate_limit_clock=clock.monotonic, rate_limit_sleep=clock.sleep)
+    client._ctx = AlwaysRateLimitedContext()
+
+    try:
+        client.get_option_chain("US.AAPL", "2026-06-26")
+    except OptionsReportError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected OptionsReportError")
+
+    assert "OpenD failed to get option chain" in message
+    assert "high frequency" in message
+    assert clock.sleeps == [30.25]
 
 
 def test_opend_capability_contract_marks_verified_and_optional_scoring_fields() -> None:

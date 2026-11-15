@@ -55,6 +55,12 @@ def format_weekly_screen_telegram_html(result) -> str:
     )
 
 
+def parse_symbols(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return ()
+    return tuple(symbol.strip() for symbol in value.split(",") if symbol.strip())
+
+
 def main() -> int:
     env = load_env(ROOT / ".env.example")
     env.update(load_env(ROOT / ".env"))
@@ -65,6 +71,7 @@ def main() -> int:
     parser.add_argument("--post", action="store_true")
     parser.add_argument("--fixture", action="store_true", help="Use deterministic local fixture data instead of OpenD.")
     parser.add_argument("--market", default="US")
+    parser.add_argument("--symbols", default="", help="Comma-separated explicit ticker watchlist, for example DRAM,SMH,MU,SNDK.")
     parser.add_argument("--top-n", type=int, default=10)
     parser.add_argument("--min-days-out", type=int, default=5)
     parser.add_argument("--target-days-out", type=int, default=7)
@@ -74,6 +81,7 @@ def main() -> int:
     parser.add_argument("--max-abs-delta", type=float, default=0.60)
     parser.add_argument("--historical-volatility", type=float, default=0.25)
     parser.add_argument("--max-underlyings", type=int, default=int(env.get("WEEKLY_MAX_UNDERLYINGS", "60")))
+    parser.add_argument("--max-strategy-loss", type=float, default=5.0, help="Maximum defined loss per contract, quoted as option premium dollars. 5.0 equals roughly $500 per US contract.")
     parser.add_argument("--output-dir", type=pathlib.Path, default=ROOT / "reports" / "weekly-options")
     parser.add_argument("--report-format", choices=("html", "pdf"), default="html")
     parser.add_argument("--pricing-engine", choices=("legacy", "quantlib"), default="legacy")
@@ -118,6 +126,9 @@ def main() -> int:
         analysis_mode=args.analysis_mode,
         stock_review=args.stock_review,
         stock_review_model=args.stock_review_model,
+        explicit_symbols=parse_symbols(args.symbols),
+        max_strategy_loss=args.max_strategy_loss,
+        strategy_scope="defined-risk-only",
     )
     reviewer_defaults = load_weekly_reviewer_config(env)
     reviewer_config = WeeklyReviewerConfig(
@@ -152,6 +163,8 @@ def main() -> int:
     print(f"html: {html_path}")
     summary = weekly_run_summary(result)
     print(f"attempted-symbols: {summary['attempted_symbols']}")
+    if result.request.explicit_symbols:
+        print(f"explicit-symbols: {len(result.request.explicit_symbols)}")
     print(f"successful-symbols: {summary['successful_symbol_count']}")
     print(f"skipped-symbols: {summary['skipped_symbol_count']}")
     for gate_row in result.gate_summary.stage_rows:

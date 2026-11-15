@@ -53,6 +53,8 @@ from quant_researcher_desk.moomoo_options_report import (
     normalize_option_type,
 )
 from quant_researcher_desk.options_research import (
+    ContractVettingPolicy,
+    OptionContract,
     build_option_contracts,
     black_scholes,
     classify_event_risk,
@@ -67,8 +69,10 @@ from quant_researcher_desk.options_research import (
     pricing_comparison_summary,
     pricing_engine_available,
     solve_implied_volatility_with_engine,
+    vet_option_contract,
     years_to_expiry,
 )
+from quant_researcher_desk.options_strategy_router import StrategyRouteRequest, route_option_strategies
 from quant_researcher_desk.reporting import ReportRenderError, render_html_file_to_pdf_with_chrome, write_native_pdf_report
 from quant_researcher_desk.stock_context import StockContext, StockReviewResult, build_stock_context, fallback_stock_review
 
@@ -99,6 +103,9 @@ class WeeklyScreenRequest:
     analysis_mode: str = "stock-first"
     stock_review: bool = True
     stock_review_model: str = "gpt-5.5"
+    explicit_symbols: tuple[str, ...] = ()
+    max_strategy_loss: float = 5.0
+    strategy_scope: str = "defined-risk-only"
 
 
 @dataclass(frozen=True)
@@ -156,6 +163,23 @@ class ScreenedOption:
     catalyst_view: str = ""
     stock_review_confidence: str = ""
     countertrend_risk: str = ""
+    strategy_verdict: str = "no_trade"
+    strategy_name: str = "No Trade"
+    strategy_structure: str = "no_trade"
+    strategy_net_debit: float = 0.0
+    strategy_net_credit: float = 0.0
+    strategy_max_loss: float = 0.0
+    strategy_max_profit: float | None = None
+    strategy_breakeven: float = 0.0
+    strategy_score: float = 0.0
+    strategy_risk_notes: tuple[str, ...] = ()
+    watch_underlying_level: str = ""
+    watch_breakeven: str = ""
+    watch_exit_trigger: str = ""
+    council_investment_view: str = ""
+    council_trading_view: str = ""
+    council_risk_view: str = ""
+    council_portfolio_view: str = ""
 
 
 @dataclass(frozen=True)
@@ -371,6 +395,46 @@ def _normalized_market(value: str) -> str:
     if market != "US":
         raise OptionsReportError("Weekly options screener milestone is US-only.")
     return market
+
+
+def _normalize_explicit_symbol(symbol: str, market: str) -> str:
+    cleaned = symbol.strip().upper()
+    if not cleaned:
+        raise OptionsReportError("Explicit symbol list contains an empty ticker.")
+    if "." in cleaned:
+        prefix, ticker = cleaned.split(".", 1)
+        if prefix != market or not ticker:
+            raise OptionsReportError(f"Explicit symbol {symbol} is not a valid {market} ticker.")
+        return f"{prefix}.{ticker}"
+    return f"{market}.{cleaned}"
+
+
+def explicit_universe(
+    symbols: tuple[str, ...],
+    market: str,
+) -> tuple[list[UnderlyingCandidate], dict[str, int]]:
+    seen: set[str] = set()
+    universe: list[UnderlyingCandidate] = []
+    for symbol in symbols:
+        normalized = _normalize_explicit_symbol(symbol, market)
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        ticker = normalized.split(".", 1)[1]
+        universe.append(
+            UnderlyingCandidate(
+                symbol=normalized,
+                company=ticker,
+                source_plates=("explicit_watchlist",),
+            )
+        )
+    return universe, {
+        "plates": 0,
+        "raw_constituents": len(universe),
+        "unique_underlyings": len(universe),
+        "plate_rate_limit_hits": 0,
+        "explicit_symbols": len(universe),
+    }
 
 
 def _is_plate_constituent_rate_limit(exc: OptionsReportError) -> bool:
@@ -618,15 +682,78 @@ def _valuation_context_score(
     )
 
 
+def _strategy_controls(request: WeeklyScreenRequest) -> tuple[bool, bool]:
+    scope = request.strategy_scope.strip().lower()
+    if scope == "defined-risk-only":
+        return False, False
+    if scope == "all":
+        return True, True
+    raise OptionsReportError(f"Unsupported strategy scope: {request.strategy_scope}")
+
+
 def _contract_passes_filters(contract: Any, request: WeeklyScreenRequest) -> bool:
-    premium = float(contract.market_price)
-    delta = abs(float(contract.delta or 0.0))
-    return (
-        premium > 0
-        and contract.volume >= request.min_volume
-        and contract.open_interest >= request.min_open_interest
-        and request.min_abs_delta <= delta <= request.max_abs_delta
+    result = vet_option_contract(
+        contract,
+        ContractVettingPolicy(
+            min_volume=request.min_volume,
+            min_open_interest=request.min_open_interest,
+            min_abs_delta=request.min_abs_delta,
+            max_abs_delta=request.max_abs_delta,
+        ),
     )
+    return result.passed
+
+
+def _watch_underlying_level(
+    underlying_price: float,
+    option_side: str,
+    stock_review: StockReviewResult | None,
+) -> str:
+    if stock_review and stock_review.invalidation:
+        return stock_review.invalidation
+    if option_side == "CALL":
+        return f"Review if underlying loses {underlying_price * 0.97:.2f}."
+    if option_side == "PUT":
+        return f"Review if underlying reclaims {underlying_price * 1.03:.2f}."
+    return f"Review if underlying breaks away from {underlying_price:.2f} context."
+
+
+def _watch_breakeven(strategy_breakeven: float, option_side: str, contract: Any) -> str:
+    if strategy_breakeven > 0:
+        return f"{strategy_breakeven:.2f}"
+    breakeven = contract.strike + contract.market_price if option_side == "CALL" else contract.strike - contract.market_price
+    return f"{breakeven:.2f}"
+
+
+def _watch_exit_trigger(days_to_expiry: int, event_risk: str) -> str:
+    trigger = f"Review before 2 DTE; selected contract has {days_to_expiry} DTE."
+    if event_risk in {"high", "unknown"}:
+        return f"{trigger} Keep event timing confirmation open before upgrading."
+    return trigger
+
+
+def _council_views(
+    candidate: UnderlyingCandidate,
+    option_side: str,
+    valuation: str,
+    model_edge_pct: float,
+    strategy_name: str,
+    strategy_max_loss: float,
+) -> tuple[str, str, str, str]:
+    ticker = candidate.symbol.replace("US.", "")
+    investment = (
+        f"{ticker} stays in review while stock direction and memory/semiconductor thesis remain aligned; "
+        f"valuation reads {valuation} with model edge {model_edge_pct:.1%}."
+    )
+    trading = f"Prefer {strategy_name or 'defined-risk option'} only if spread, delta, and breakeven remain executable."
+    risk = f"Max defined loss is {strategy_max_loss * 100:.0f} USD per contract before fees/slippage."
+    if ticker == "DRAM":
+        portfolio = "Higher-conviction watch versus the basket, but only after pricing and trend gates stay aligned."
+    elif ticker == "SMH":
+        portfolio = "Use as diversified semiconductor exposure; avoid oversizing alongside single-name memory contracts."
+    else:
+        portfolio = "Treat as an options-only expression unless capital is deliberately reserved for shares."
+    return investment, trading, risk, portfolio
 
 
 def _score_contract(
@@ -638,6 +765,7 @@ def _score_contract(
     stock_review: StockReviewResult | None = None,
     earnings: EarningsContext | None = None,
     pricing_engines: dict[str, Any] | None = None,
+    candidate_contracts: tuple[OptionContract, ...] = (),
 ) -> ScreenedOption:
     years = years_to_expiry(contract.expiry, now)
     volatility = contract.implied_volatility or solve_implied_volatility_with_engine(
@@ -728,6 +856,39 @@ def _score_contract(
         f"Valuation context is {blended_edge_pct:.1%} on a weekly horizon, with IV {volatility:.1%} versus "
         f"HV {request.historical_volatility:.1%}. Event risk is {event_risk}."
     )
+    include_income, allow_credit_spreads = _strategy_controls(request)
+    strategy_route = route_option_strategies(
+        StrategyRouteRequest(
+            contracts=candidate_contracts or (contract,),
+            selected_contract=contract,
+            underlying_price=underlying_price,
+            direction=stock_review.direction if stock_review else "no_trade",
+            implied_volatility=volatility,
+            historical_volatility=request.historical_volatility,
+            model_edge_pct=blended_edge_pct,
+            max_loss_per_contract=request.max_strategy_loss,
+            include_income=include_income,
+            allow_credit_spreads=allow_credit_spreads,
+        )
+    )
+    selected_strategy = strategy_route.selected
+    strategy_name = selected_strategy.name if selected_strategy else "No Trade"
+    strategy_max_loss = selected_strategy.max_loss if selected_strategy else 0.0
+    watch_underlying = _watch_underlying_level(underlying_price, option_side, stock_review)
+    watch_breakeven = _watch_breakeven(
+        selected_strategy.breakeven if selected_strategy else 0.0,
+        option_side,
+        contract,
+    )
+    watch_exit = _watch_exit_trigger(days_to_expiry, event_risk)
+    council_views = _council_views(
+        candidate,
+        option_side,
+        valuation_view(blended_edge_pct),
+        blended_edge_pct,
+        strategy_name,
+        strategy_max_loss,
+    )
     return ScreenedOption(
         symbol=candidate.symbol,
         company=candidate.company,
@@ -772,6 +933,23 @@ def _score_contract(
         catalyst_view=stock_review.catalyst_view if stock_review else "",
         stock_review_confidence=stock_review.review_confidence if stock_review else "",
         countertrend_risk=stock_review.countertrend_risk if stock_review else "",
+        strategy_verdict=strategy_route.verdict,
+        strategy_name=strategy_name,
+        strategy_structure=selected_strategy.structure if selected_strategy else "no_trade",
+        strategy_net_debit=selected_strategy.net_debit if selected_strategy else 0.0,
+        strategy_net_credit=selected_strategy.net_credit if selected_strategy else 0.0,
+        strategy_max_loss=strategy_max_loss,
+        strategy_max_profit=selected_strategy.max_profit if selected_strategy else None,
+        strategy_breakeven=selected_strategy.breakeven if selected_strategy else 0.0,
+        strategy_score=selected_strategy.score if selected_strategy else 0.0,
+        strategy_risk_notes=selected_strategy.risk_notes if selected_strategy else strategy_route.rejection_reasons,
+        watch_underlying_level=watch_underlying,
+        watch_breakeven=watch_breakeven,
+        watch_exit_trigger=watch_exit,
+        council_investment_view=council_views[0],
+        council_trading_view=council_views[1],
+        council_risk_view=council_views[2],
+        council_portfolio_view=council_views[3],
     )
 
 
@@ -899,7 +1077,10 @@ def build_weekly_options_screen(
         raise OptionsReportError(
             "Pricing engine 'quantlib' is unavailable. Install the QuantLib Python package before selecting it."
         )
-    universe, stats = discover_universe(client, market, request.max_underlyings)
+    if request.explicit_symbols:
+        universe, stats = explicit_universe(request.explicit_symbols, market)
+    else:
+        universe, stats = discover_universe(client, market, request.max_underlyings)
     ranked_options: list[ScreenedOption] = []
     skipped: list[SymbolSkip] = []
     with_target_expiry = 0
@@ -908,7 +1089,11 @@ def build_weekly_options_screen(
             _gate_pass(
                 GATE_STAGE_UNIVERSE_DISCOVERY,
                 "discovered_in_universe",
-                f"Discovered from Moomoo plates: {', '.join(candidate.source_plates)}.",
+                (
+                    f"Provided by explicit symbol watchlist: {candidate.symbol}."
+                    if "explicit_watchlist" in candidate.source_plates
+                    else f"Discovered from Moomoo plates: {', '.join(candidate.source_plates)}."
+                ),
             )
         ]
         for candidate in universe
@@ -1077,6 +1262,7 @@ def build_weekly_options_screen(
                         stock_review,
                         earnings,
                         pricing_engines,
+                        tuple(liquid_contracts),
                     )
                 )
         except SymbolExecutionError as exc:
@@ -1281,6 +1467,23 @@ def shortlist_rows(result: WeeklyScreenResult) -> list[dict[str, Any]]:
             "event_risk_detail": option.event_risk_detail,
             "review_status": option.review_status,
             "review_flags": ", ".join(option.review_flags),
+            "strategy": option.strategy_name,
+            "strategy_verdict": option.strategy_verdict,
+            "strategy_structure": option.strategy_structure,
+            "strategy_breakeven": round(option.strategy_breakeven, 4),
+            "strategy_max_loss": round(option.strategy_max_loss, 4),
+            "strategy_max_profit": round(option.strategy_max_profit, 4) if option.strategy_max_profit is not None else None,
+            "strategy_net_debit": round(option.strategy_net_debit, 4),
+            "strategy_net_credit": round(option.strategy_net_credit, 4),
+            "strategy_score": round(option.strategy_score, 4),
+            "strategy_risk_notes": " ".join(option.strategy_risk_notes),
+            "watch_underlying_level": option.watch_underlying_level,
+            "watch_breakeven": option.watch_breakeven,
+            "watch_exit_trigger": option.watch_exit_trigger,
+            "council_investment_view": option.council_investment_view,
+            "council_trading_view": option.council_trading_view,
+            "council_risk_view": option.council_risk_view,
+            "council_portfolio_view": option.council_portfolio_view,
         }
         for option in result.ranked_options
     ]
@@ -1783,6 +1986,7 @@ def result_payload(result: WeeklyScreenResult) -> dict[str, Any]:
         "run_summary": weekly_run_summary(result),
         "gate_results": [asdict(gate_result) for gate_result in result.gate_results],
         "gate_summary": asdict(result.gate_summary),
+        "universe": [asdict(candidate) for candidate in result.universe],
         "skipped_underlyings": list(result.skipped_underlyings),
         "skipped_symbols": [asdict(skip) for skip in result.skipped_symbols],
         "required_columns": list(shortlist_rows(result)[0].keys()) if result.ranked_options else [],

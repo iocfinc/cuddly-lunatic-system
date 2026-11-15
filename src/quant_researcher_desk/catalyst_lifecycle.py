@@ -41,6 +41,21 @@ class CatalystIdeaRecord:
     stock_review_summary: str
     invalidation: str
     rationale: str
+    research_verdict: str = "Not Reviewed"
+    research_risks: tuple[str, ...] = ()
+    valuation_view: str = "Unknown"
+    model_edge_pct: float = 0.0
+    scenario_count: int = 0
+    strategy_verdict: str = "no_trade"
+    strategy_name: str = "No Trade"
+    strategy_structure: str = "no_trade"
+    strategy_net_debit: float = 0.0
+    strategy_net_credit: float = 0.0
+    strategy_max_loss: float = 0.0
+    strategy_max_profit: float | None = None
+    strategy_breakeven: float = 0.0
+    strategy_score: float = 0.0
+    strategy_risk_notes: tuple[str, ...] = ()
     entry_assumption: str = "paper_review_only"
     max_holding_days: int = 7
     research_only: bool = True
@@ -165,6 +180,21 @@ def catalyst_records_from_report(report: CatalystOptionsScreenReport) -> tuple[C
                 stock_review_summary=idea.stock_review_summary,
                 invalidation=idea.invalidation,
                 rationale=idea.rationale,
+                research_verdict=idea.research_verdict,
+                research_risks=idea.research_risks,
+                valuation_view=idea.valuation_view,
+                model_edge_pct=idea.model_edge_pct,
+                scenario_count=idea.scenario_count,
+                strategy_verdict=idea.strategy_verdict,
+                strategy_name=idea.strategy_name,
+                strategy_structure=idea.strategy_structure,
+                strategy_net_debit=idea.strategy_net_debit,
+                strategy_net_credit=idea.strategy_net_credit,
+                strategy_max_loss=idea.strategy_max_loss,
+                strategy_max_profit=idea.strategy_max_profit,
+                strategy_breakeven=idea.strategy_breakeven,
+                strategy_score=idea.strategy_score,
+                strategy_risk_notes=idea.strategy_risk_notes,
             )
         )
     return tuple(records)
@@ -311,7 +341,7 @@ def build_advisor_deliberation(artifact: CatalystScreenArtifact) -> AdvisorDelib
     checks.append(
         _check(
             "unmapped_timing_stays_conditional",
-            all(idea.review_level == "Conditional Watch" for idea in artifact.ideas if idea.evidence_status == "unmapped"),
+            all(idea.review_level != "Priority Review" for idea in artifact.ideas if idea.evidence_status == "unmapped"),
             "Unmapped catalyst timing is not upgraded to priority review.",
         )
     )
@@ -326,7 +356,21 @@ def build_advisor_deliberation(artifact: CatalystScreenArtifact) -> AdvisorDelib
         _check(
             "backtest_evidence_present",
             all(review.backtest.day_count >= 5 for review in artifact.lifecycle_reviews),
-            "Every lifecycle review includes a multi-day backtest path.",
+            "Every lifecycle review includes a multi-day simulation path.",
+        )
+    )
+    checks.append(
+        _check(
+            "no_rejected_pricing",
+            all(idea.research_verdict != "Reject" for idea in artifact.ideas),
+            "No published idea has a rejected options-research pricing verdict.",
+        )
+    )
+    checks.append(
+        _check(
+            "scenario_evidence_present",
+            all(idea.scenario_count > 0 for idea in artifact.ideas),
+            "Every published idea includes scenario evidence from options research.",
         )
     )
     combined_text = " ".join(
@@ -353,7 +397,7 @@ def build_advisor_deliberation(artifact: CatalystScreenArtifact) -> AdvisorDelib
         checks=tuple(checks),
         blockers=blockers,
         summary=(
-            "Advisor gate passed: screen is auditable, research-only, lifecycle-aware, and backed by replay evidence."
+            "Advisor gate passed: screen is auditable, research-only, lifecycle-aware, and backed by simulation evidence."
             if verdict == "PASS"
             else "Advisor gate failed: one or more evidence or safety checks did not pass."
         ),
@@ -407,8 +451,8 @@ def advisor_report_sections(
             "table": lifecycle_rows,
         },
         {
-            "title": "Backtest Evidence",
-            "summary": "Fixture replay evidence checks premium path behavior across the intended holding window. It is validation context, not a return forecast.",
+            "title": "Simulation Evidence",
+            "summary": "Synthetic simulation evidence checks premium path behavior across the intended holding window. It is validation context, not a live or historical return forecast.",
             "table": backtest_rows,
         },
         {
