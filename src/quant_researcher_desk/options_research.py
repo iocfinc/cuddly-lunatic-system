@@ -91,6 +91,23 @@ class OptionContract:
 
 
 @dataclass(frozen=True)
+class ContractVettingPolicy:
+    min_volume: int = 100
+    min_open_interest: int = 100
+    min_abs_delta: float = 0.20
+    max_abs_delta: float = 0.60
+    max_abs_moneyness_pct: float = 0.35
+
+
+@dataclass(frozen=True)
+class ContractVettingResult:
+    contract: OptionContract
+    passed: bool
+    reason_codes: tuple[str, ...]
+    detail: str
+
+
+@dataclass(frozen=True)
 class BlackScholesResult:
     theoretical_value: float
     delta: float
@@ -199,6 +216,53 @@ class OptionsResearchReport:
     strategy_candidates: tuple[StrategyCandidate, ...] = ()
 
 
+def vet_option_contract(
+    contract: OptionContract,
+    policy: ContractVettingPolicy | None = None,
+    underlying_price: float | None = None,
+) -> ContractVettingResult:
+    policy = policy or ContractVettingPolicy()
+    reasons: list[str] = []
+    if contract.market_price <= 0:
+        reasons.append("nonpositive_premium")
+    if contract.volume < policy.min_volume:
+        reasons.append("low_volume")
+    if contract.open_interest < policy.min_open_interest:
+        reasons.append("low_open_interest")
+    delta = abs(contract.delta or 0.0)
+    if not (policy.min_abs_delta <= delta <= policy.max_abs_delta):
+        reasons.append("delta_outside_band")
+    if underlying_price is not None and underlying_price > 0:
+        moneyness_distance = abs(contract.strike / underlying_price - 1.0)
+        if moneyness_distance > policy.max_abs_moneyness_pct:
+            reasons.append("strike_outside_underlying_band")
+    detail = (
+        "Contract passed shared options vetting."
+        if not reasons
+        else "Contract failed shared options vetting: " + ", ".join(reason.replace("_", " ") for reason in reasons) + "."
+    )
+    return ContractVettingResult(contract=contract, passed=not reasons, reason_codes=tuple(reasons), detail=detail)
+
+
+def filter_vetted_contracts(
+    contracts: list[OptionContract] | tuple[OptionContract, ...],
+    policy: ContractVettingPolicy | None = None,
+    option_type: str | None = None,
+    underlying_price: float | None = None,
+) -> tuple[OptionContract, ...]:
+    normalized_type = normalize_option_type(option_type) if option_type else None
+    return tuple(
+        contract
+        for contract in contracts
+        if (normalized_type is None or contract.option_type == normalized_type)
+        and vet_option_contract(contract, policy, underlying_price=underlying_price).passed
+    )
+
+
+def research_report_is_screenable(report: OptionsResearchReport) -> bool:
+    return report.verdict != "Reject"
+
+
 class FixtureOptionsResearchProvider:
     """Deterministic provider used for offline tests and cron dry-runs."""
 
@@ -210,15 +274,16 @@ class FixtureOptionsResearchProvider:
 
     def get_option_expirations(self, symbol: str) -> list[str]:
         if symbol == "US.TEST":
-            return ["2026-05-15", "2026-06-19"]
+            return ["2026-05-15", "2026-06-19", *fixture_expiries(self.anchor_date)]
         return fixture_expiries(self.anchor_date)
 
     def get_option_chain(self, symbol: str, expiry: str) -> list[dict[str, Any]]:
         if symbol == "US.TEST":
+            code_prefix = f"{symbol}{expiry.replace('-', '')[2:]}"
             return [
-                {"code": f"{symbol}260515C100000", "option_type": "CALL", "strike_price": 100.0, "strike_time": expiry},
-                {"code": f"{symbol}260515C105000", "option_type": "CALL", "strike_price": 105.0, "strike_time": expiry},
-                {"code": f"{symbol}260515P095000", "option_type": "PUT", "strike_price": 95.0, "strike_time": expiry},
+                {"code": f"{code_prefix}C100000", "option_type": "CALL", "strike_price": 100.0, "strike_time": expiry},
+                {"code": f"{code_prefix}C105000", "option_type": "CALL", "strike_price": 105.0, "strike_time": expiry},
+                {"code": f"{code_prefix}P095000", "option_type": "PUT", "strike_price": 95.0, "strike_time": expiry},
             ]
         return fixture_option_chain(symbol, expiry)
 

@@ -9,11 +9,26 @@ from typing import Protocol
 
 from quant_researcher_desk.moomoo_options_report import (
     QuoteClient,
-    build_options_report,
+    as_float,
     format_number,
+    get_first,
+    target_expiry,
 )
 from quant_researcher_desk.moomoo_options_report import RankedOption as ChainOption
-from quant_researcher_desk.options_research import EarningsContext, classify_event_risk, get_earnings_context
+from quant_researcher_desk.options_research import (
+    ContractVettingPolicy,
+    EarningsContext,
+    OptionContract,
+    OptionsResearchRequest,
+    build_option_contracts,
+    build_options_research_report,
+    classify_event_risk,
+    filter_vetted_contracts,
+    get_earnings_context,
+    research_report_is_screenable,
+    vet_option_contract,
+)
+from quant_researcher_desk.options_strategy_router import StrategyRouteRequest, route_option_strategies
 from quant_researcher_desk.stock_context import StockReviewResult, build_stock_context, fallback_stock_review
 from quant_researcher_desk.fixture_options_market import (
     fixture_daily_bars,
@@ -52,6 +67,21 @@ class RankedOptionIdea:
     stock_review_summary: str
     invalidation: str
     beginner_note: str
+    research_verdict: str = "Not Reviewed"
+    research_risks: tuple[str, ...] = ()
+    valuation_view: str = "Unknown"
+    model_edge_pct: float = 0.0
+    scenario_count: int = 0
+    strategy_verdict: str = "no_trade"
+    strategy_name: str = "No Trade"
+    strategy_structure: str = "no_trade"
+    strategy_net_debit: float = 0.0
+    strategy_net_credit: float = 0.0
+    strategy_max_loss: float = 0.0
+    strategy_max_profit: float | None = None
+    strategy_breakeven: float = 0.0
+    strategy_score: float = 0.0
+    strategy_risk_notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -177,23 +207,6 @@ def option_rationale(option: ChainOption, side: str) -> str:
     return " ".join(parts)
 
 
-def best_option(options: list[ChainOption]) -> ChainOption | None:
-    liquid = [
-        option
-        for option in options
-        if option.last_price is not None
-        and option.last_price > 0
-        and option.volume >= 25
-        and option.open_interest >= 100
-        and 0.15 <= abs(option.delta or 0.0) <= 0.65
-    ]
-    if not liquid:
-        liquid = [option for option in options if option.last_price is not None and option.last_price > 0]
-    if not liquid:
-        return None
-    return max(liquid, key=option_score)
-
-
 def _load_stock_review(client: CatalystQuoteClient, candidate: CatalystCandidate) -> StockReviewResult:
     rows = client.get_daily_bars(candidate.symbol, count=250)
     context = build_stock_context(candidate.symbol, rows)
@@ -241,6 +254,123 @@ def _score_adjustment_for_event_risk(event_risk: str) -> float:
     return -25.0
 
 
+def _chain_option_from_contract(contract: OptionContract, underlying_price: float | None) -> ChainOption:
+    strike_distance = abs(contract.strike - underlying_price) if underlying_price is not None else 0.0
+    return ChainOption(
+        code=contract.code,
+        option_type=contract.option_type,
+        strike=contract.strike,
+        last_price=contract.market_price,
+        implied_volatility=contract.implied_volatility,
+        delta=contract.delta,
+        open_interest=contract.open_interest,
+        volume=contract.volume,
+        strike_distance=strike_distance,
+    )
+
+
+def _candidate_contracts(
+    client: CatalystQuoteClient,
+    symbol: str,
+    generated_at: dt.datetime,
+    minimum_days_out: int,
+    target_days_out: int,
+) -> tuple[float | None, str, tuple[OptionContract, ...]]:
+    underlying = client.get_underlying_snapshot(symbol)
+    underlying_price = as_float(get_first(underlying, "last_price", "cur_price", "price", default=None))
+    expiry = target_expiry(
+        client.get_option_expirations(symbol),
+        today=generated_at.date(),
+        minimum_days_out=minimum_days_out,
+        target_days_out=target_days_out,
+    )
+    chain_rows = client.get_option_chain(symbol, expiry)
+    codes = [str(row.get("code", "")).strip() for row in chain_rows if str(row.get("code", "")).strip()]
+    snapshot_rows = client.get_market_snapshots(codes) if codes else []
+    return underlying_price, expiry, tuple(build_option_contracts(chain_rows, snapshot_rows, expiry))
+
+
+def _research_vetted_idea(
+    client: CatalystQuoteClient,
+    candidate: CatalystCandidate,
+    contracts: tuple[OptionContract, ...],
+    aligned_side: str,
+    generated_at: dt.datetime,
+    underlying_price: float | None,
+) -> tuple[ChainOption | None, str, tuple[str, ...], str, float, int, str, str, str, float, float, float, float | None, float, float, tuple[str, ...], str | None]:
+    option_type = "CALL" if aligned_side == "Call" else "PUT"
+    policy = ContractVettingPolicy()
+    vetted = filter_vetted_contracts(contracts, policy, option_type=option_type, underlying_price=underlying_price)
+    if not vetted:
+        failures = [
+            f"{contract.code}: {', '.join(vet_option_contract(contract, policy, underlying_price=underlying_price).reason_codes) or 'type_mismatch'}"
+            for contract in contracts
+            if contract.option_type == option_type
+        ]
+        return None, "Not Reviewed", (), "Unknown", 0.0, 0, "no_trade", "No Trade", "no_trade", 0.0, 0.0, 0.0, None, 0.0, 0.0, (), "No aligned option contract passed shared vetting." + (f" {'; '.join(failures[:3])}" if failures else "")
+
+    ordered = sorted(
+        vetted,
+        key=lambda contract: option_score(_chain_option_from_contract(contract, underlying_price)),
+        reverse=True,
+    )
+    rejected: list[str] = []
+    for contract in ordered:
+        research = build_options_research_report(
+            client,
+            OptionsResearchRequest(
+                symbol=candidate.symbol,
+                option_code=contract.code,
+                option_type=option_type,
+                expiry=contract.expiry,
+                strike=contract.strike,
+                strategy_gate_passed=True,
+                strategy_gate_reason="Catalyst screen stock-first and contract-quality gates passed.",
+            ),
+            now=generated_at,
+        )
+        if research_report_is_screenable(research) or research.verdict == "Reject":
+            strategy_route = route_option_strategies(
+                StrategyRouteRequest(
+                    contracts=vetted,
+                    selected_contract=research.contract,
+                    underlying_price=research.underlying_price,
+                    direction="bullish" if option_type == "CALL" else "bearish",
+                    implied_volatility=research.implied_volatility_used,
+                    historical_volatility=research.historical_volatility,
+                    model_edge_pct=research.model_edge_pct,
+                )
+            )
+            if strategy_route.selected is None:
+                rejected.append(f"{contract.code}: strategy router {', '.join(strategy_route.rejection_reasons) or strategy_route.verdict}")
+                continue
+            if research.verdict == "Reject":
+                rejected.append(f"{contract.code}: pricing verdict Reject")
+                continue
+            selected_strategy = strategy_route.selected
+            return (
+                _chain_option_from_contract(research.contract, research.underlying_price),
+                research.verdict,
+                tuple(research.risks),
+                research.valuation_view,
+                research.model_edge_pct,
+                len(research.scenario_rows),
+                strategy_route.verdict,
+                selected_strategy.name,
+                selected_strategy.structure,
+                selected_strategy.net_debit,
+                selected_strategy.net_credit,
+                selected_strategy.max_loss,
+                selected_strategy.max_profit,
+                selected_strategy.breakeven,
+                selected_strategy.score,
+                selected_strategy.risk_notes,
+                None,
+            )
+        rejected.append(f"{contract.code}: pricing verdict {research.verdict}")
+    return None, "Reject", tuple(rejected), "Unknown", 0.0, 0, "no_trade", "No Trade", "no_trade", 0.0, 0.0, 0.0, None, 0.0, 0.0, (), "; ".join(rejected)
+
+
 def build_catalyst_options_screen(
     client: CatalystQuoteClient,
     candidates: tuple[CatalystCandidate, ...] = DEFAULT_CANDIDATES,
@@ -258,33 +388,15 @@ def build_catalyst_options_screen(
         event_risk = classify_event_risk(earnings)
         try:
             stock_review = _load_stock_review(client, candidate)
-            aligned_side = "Call" if stock_review.direction == "bullish" else "Put"
+            aligned_sides = ("Call",) if stock_review.direction == "bullish" else ("Put",)
             if stock_review.direction == "no_trade":
-                note = _assessment_note(stock_review, event_risk, None)
-                assessments.append(
-                    CandidateAssessment(
-                        symbol=candidate.symbol,
-                        company=candidate.company,
-                        catalyst=candidate.catalyst,
-                        timing=timing,
-                        trend_regime=stock_review.trend_regime,
-                        stock_direction=stock_review.direction,
-                        event_risk=event_risk,
-                        review_level="Pass",
-                        top_option="Skip mixed or unresolved stock regime",
-                        note=note,
-                        beginner_note=candidate.beginner_note,
-                    )
-                )
-                skipped.append(f"{candidate.symbol}: stock-first gate blocked a mixed or no-trade regime.")
-                continue
-            report = build_options_report(
+                aligned_sides = ("Call", "Put")
+            underlying_price, expiry, contracts = _candidate_contracts(
                 client,
                 candidate.symbol,
-                rows=12,
-                now=generated_at,
-                minimum_days_out=minimum_days_out,
-                target_days_out=target_days_out,
+                generated_at,
+                minimum_days_out,
+                target_days_out,
             )
         except Exception as exc:
             assessments.append(
@@ -305,9 +417,38 @@ def build_catalyst_options_screen(
             skipped.append(f"{candidate.symbol}: {exc}")
             continue
 
-        option = best_option(report.calls if aligned_side == "Call" else report.puts)
+        side_results = [
+            (aligned_side, _research_vetted_idea(client, candidate, contracts, aligned_side, generated_at, underlying_price))
+            for aligned_side in aligned_sides
+        ]
+        aligned_side, result = sorted(
+            side_results,
+            key=lambda item: option_score(item[1][0]) if item[1][0] is not None else -1.0,
+            reverse=True,
+        )[0]
+        (
+            option,
+            research_verdict,
+            research_risks,
+            valuation_view,
+            model_edge_pct,
+            scenario_count,
+            strategy_verdict,
+            strategy_name,
+            strategy_structure,
+            strategy_net_debit,
+            strategy_net_credit,
+            strategy_max_loss,
+            strategy_max_profit,
+            strategy_breakeven,
+            strategy_score,
+            strategy_risk_notes,
+            rejection_note,
+        ) = result
         review_level = _review_level(stock_review, event_risk, option)
-        note = _assessment_note(stock_review, event_risk, option)
+        note = rejection_note or _assessment_note(stock_review, event_risk, option)
+        if option is not None and stock_review.direction == "no_trade":
+            note = f"Mixed stock regime; ranked from contract quality and event exposure instead of directional trend. {note}"
         top_option = f"{aligned_side} {format_number(option.strike)}" if option is not None else "No aligned liquid candidate"
         assessments.append(
             CandidateAssessment(
@@ -325,7 +466,7 @@ def build_catalyst_options_screen(
             )
         )
         if option is None:
-            skipped.append(f"{candidate.symbol}: no aligned liquid {aligned_side.upper()} contract passed the catalyst filters.")
+            skipped.append(f"{candidate.symbol}: {note}")
             continue
         ideas.append(
             RankedOptionIdea(
@@ -334,8 +475,8 @@ def build_catalyst_options_screen(
                 catalyst=candidate.catalyst,
                 timing=timing,
                 event_risk=event_risk,
-                underlying_price=report.underlying_price,
-                expiry=report.expiry,
+                underlying_price=underlying_price,
+                expiry=expiry,
                 option=option,
                 side=aligned_side,
                 score=option_score(option) + _score_adjustment_for_event_risk(event_risk),
@@ -346,6 +487,21 @@ def build_catalyst_options_screen(
                 stock_review_summary=stock_review.thesis_summary,
                 invalidation=stock_review.invalidation,
                 beginner_note=candidate.beginner_note,
+                research_verdict=research_verdict,
+                research_risks=research_risks,
+                valuation_view=valuation_view,
+                model_edge_pct=model_edge_pct,
+                scenario_count=scenario_count,
+                strategy_verdict=strategy_verdict,
+                strategy_name=strategy_name,
+                strategy_structure=strategy_structure,
+                strategy_net_debit=strategy_net_debit,
+                strategy_net_credit=strategy_net_credit,
+                strategy_max_loss=strategy_max_loss,
+                strategy_max_profit=strategy_max_profit,
+                strategy_breakeven=strategy_breakeven,
+                strategy_score=strategy_score,
+                strategy_risk_notes=strategy_risk_notes,
             )
         )
     return CatalystOptionsScreenReport(
@@ -375,6 +531,17 @@ def idea_rows(report: CatalystOptionsScreenReport, limit: int = 20) -> list[dict
             "iv": format_number(idea.option.implied_volatility),
             "volume": f"{idea.option.volume:,}",
             "open_interest": f"{idea.option.open_interest:,}",
+            "pricing_verdict": idea.research_verdict,
+            "valuation": idea.valuation_view,
+            "model_edge": f"{idea.model_edge_pct:.1%}",
+            "strategy": idea.strategy_name,
+            "strategy_verdict": idea.strategy_verdict,
+            "strategy_structure": idea.strategy_structure,
+            "strategy_breakeven": format_number(idea.strategy_breakeven),
+            "strategy_max_loss": format_number(idea.strategy_max_loss),
+            "strategy_max_profit": format_number(idea.strategy_max_profit),
+            "strategy_net_debit": format_number(idea.strategy_net_debit),
+            "strategy_net_credit": format_number(idea.strategy_net_credit),
             "why_it_matters": idea.catalyst,
         }
         for index, idea in enumerate(report.ideas[:limit], start=1)

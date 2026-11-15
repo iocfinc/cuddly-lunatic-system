@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import pathlib
 import sys
 import urllib.error
@@ -44,7 +45,7 @@ def main() -> int:
 
     try:
         if args.fixture:
-            client = FixtureCatalystOptionsProvider()
+            client = FixtureCatalystOptionsProvider(anchor_date=dt.date.today())
             report = build_options_report(client, symbol=args.symbol, expiry=args.expiry, rows=args.rows)
         else:
             with MoomooOpenDQuoteClient(host=args.opend_host, port=args.opend_port) as client:

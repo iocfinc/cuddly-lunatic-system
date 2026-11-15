@@ -278,6 +278,33 @@ def test_build_weekly_options_screen_dedupes_universe_and_filters_bad_contracts(
     }
 
 
+def test_build_weekly_options_screen_can_use_explicit_symbols_without_plate_discovery() -> None:
+    class ExplicitSymbolClient(FakeWeeklyQuoteClient):
+        def get_plate_list(self, market: str, plate_type: str = "ALL") -> list[dict[str, object]]:
+            raise AssertionError("explicit symbols should bypass plate discovery")
+
+        def get_plate_constituents(self, plate_code: str) -> list[dict[str, object]]:
+            raise AssertionError("explicit symbols should bypass plate discovery")
+
+    report = build_weekly_options_screen(
+        ExplicitSymbolClient(),
+        WeeklyScreenRequest(
+            market="US",
+            top_n=4,
+            historical_volatility=0.22,
+            explicit_symbols=("NOOPT", "US.AAPL", "MSFT", "US.AAPL"),
+        ),
+        now=dt.datetime(2026, 5, 24, 9, 30, tzinfo=dt.timezone.utc),
+    )
+
+    assert [candidate.symbol for candidate in report.universe] == ["US.NOOPT", "US.AAPL", "US.MSFT"]
+    assert report.discovery_stats["explicit_symbols"] == 3
+    assert report.discovery_stats["unique_underlyings"] == 3
+    assert report.discovery_stats["raw_constituents"] == 3
+    assert any(skip.symbol == "US.NOOPT" and skip.reason_code == "no_expirations" for skip in report.skipped_symbols)
+    assert {option.symbol for option in report.ranked_options} == {"US.AAPL", "US.MSFT"}
+
+
 def test_discover_universe_returns_partial_results_when_plate_queries_hit_opend_rate_limit() -> None:
     client = RateLimitedPlateQuoteClient()
 
@@ -452,8 +479,26 @@ def test_shortlist_rows_include_required_screen_columns() -> None:
             "event_risk_detail",
             "review_status",
             "review_flags",
+            "strategy",
+            "strategy_verdict",
+            "strategy_breakeven",
+            "strategy_max_loss",
+            "strategy_max_profit",
+            "strategy_net_debit",
+            "strategy_net_credit",
         ]
     ).issubset(row.keys())
+    assert row["strategy"]
+    assert row["strategy_verdict"] == "selected"
+    assert row["strategy_max_loss"] > 0
+    assert row["strategy_structure"] in {"long_call", "long_put", "call_debit_spread", "put_debit_spread"}
+    assert row["watch_underlying_level"]
+    assert row["watch_breakeven"]
+    assert row["watch_exit_trigger"]
+    assert row["council_investment_view"]
+    assert row["council_trading_view"]
+    assert row["council_risk_view"]
+    assert row["council_portfolio_view"]
 
 
 def test_build_weekly_options_screen_can_review_shortlist_without_blocking_output() -> None:

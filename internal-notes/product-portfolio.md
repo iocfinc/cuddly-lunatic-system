@@ -24,6 +24,7 @@ Status: 🚧 In Development
 * Strategy builder
 * Backtesting engine
 * Performance analytics
+* Options Catalyst lifecycle and persona review map: `internal-notes/features/options-catalyst-product-map/PRD.md`
 
 Status: 🔜 Next Phase
 
@@ -113,4 +114,3 @@ We ARE:
 To become:
 
 > “A personal quant desk that rivals institutional thinking in structure, if not scale.”
-

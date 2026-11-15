@@ -604,6 +604,7 @@ def _render_overview_panel(packet: WeeklyOptionsPacket) -> str:
 def _render_top_10_panel(packet: WeeklyOptionsPacket, weekly_rows: list[dict[str, Any]]) -> str:
     header = (
         "<tr><th>Rank</th><th>Symbol</th><th>Contract</th><th>Side</th><th>Expiry</th><th>Strike</th><th>Premium</th>"
+        "<th>Strategy</th><th>Strategy Verdict</th><th>Breakeven</th><th>Max Loss</th><th>Max Profit</th>"
         "<th>Trend Regime</th><th>Stock Direction</th><th>Fair Value Gap %</th><th>Valuation View</th><th>Review Status</th></tr>"
     )
     body_rows = []
@@ -617,6 +618,11 @@ def _render_top_10_panel(packet: WeeklyOptionsPacket, weekly_rows: list[dict[str
             f"<td>{_escape(row['expiry'])}</td>"
             f"<td>{_escape(row['strike'])}</td>"
             f"<td>{_escape(row['premium'])}</td>"
+            f"<td>{_escape(row['strategy'])}</td>"
+            f"<td>{_escape(row['strategy_verdict'])}</td>"
+            f"<td>{_escape(row['strategy_breakeven'])}</td>"
+            f"<td>{_escape(row['strategy_max_loss'])}</td>"
+            f"<td>{_escape(row['strategy_max_profit'])}</td>"
             f"<td>{_escape(row['trend_regime'])}</td>"
             f"<td>{_escape(row['stock_direction'])}</td>"
             f"<td>{_escape(row['fair_value_gap_pct'])}</td>"

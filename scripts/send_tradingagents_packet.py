@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import os
 import pathlib
 import sys
@@ -18,7 +19,9 @@ from quant_researcher_desk.moomoo_options_report import MoomooOpenDQuoteClient  
 from quant_researcher_desk.options_research import OptionsResearchRequest  # noqa: E402
 from quant_researcher_desk.reporting import ReportRenderError, render_pdf_report, write_html_report  # noqa: E402
 from quant_researcher_desk.tradingagents_packet import (  # noqa: E402
+    TRADINGAGENTS_PRESETS,
     TradingAgentsPacketRequest,
+    apply_tradingagents_preset_env,
     build_decision_packet,
     build_desk_evidence_pack,
     decision_packet_sections,
@@ -57,6 +60,7 @@ def main() -> int:
     parser.add_argument("--dry-run", action="store_true", help="Print the caption, attachment path, and artifact path without posting.")
     parser.add_argument("--post", action="store_true", help="Post the packet attachment when Telegram is enabled.")
     parser.add_argument("--fixture", action="store_true", help="Use deterministic local packet synthesis without live LLM or TradingAgents.")
+    parser.add_argument("--preset", choices=sorted(TRADINGAGENTS_PRESETS), help="Apply a named TradingAgents runtime preset.")
     parser.add_argument("--symbol", default=env.get("MOOMOO_DEFAULT_SYMBOL", "US.TSM"))
     parser.add_argument("--analysis-date", help="Analysis date in YYYY-MM-DD format for the live TradingAgents adapter.")
     parser.add_argument("--option-code")
@@ -72,10 +76,11 @@ def main() -> int:
     parser.add_argument("--opend-port", type=int, default=int(env.get("MOOMOO_OPEND_PORT", "11111")))
     args = parser.parse_args()
 
-    config_env = dict(env)
+    config_env = apply_tradingagents_preset_env(dict(env), args.preset, today=dt.date.today())
     if args.results_dir:
         config_env["TRADINGAGENTS_RESULTS_DIR"] = str(args.results_dir)
     config = load_tradingagents_config(ROOT, env=env, runtime_env=config_env)
+    analysis_date = args.analysis_date or config_env.get("TRADINGAGENTS_ANALYSIS_DATE")
 
     request = OptionsResearchRequest(
         symbol=args.symbol,
@@ -88,7 +93,7 @@ def main() -> int:
     )
     packet_request = TradingAgentsPacketRequest(
         symbol=args.symbol,
-        analysis_date=args.analysis_date,
+        analysis_date=analysis_date,
         report_format=args.report_format,
         post_to_telegram=args.post,
     )

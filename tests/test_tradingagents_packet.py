@@ -13,11 +13,14 @@ sys.path.insert(0, str(ROOT / "src"))
 from quant_researcher_desk.options_research import FixtureOptionsResearchProvider, OptionsResearchRequest
 from quant_researcher_desk.tradingagents_packet import (
     AgentDebateResult,
+    TRADINGAGENTS_HY3_MODEL,
+    TRADINGAGENTS_HY3_PRESET,
     TradingAgentsConfig,
     TradingAgentsIntegrationError,
     TradingAgentsPacketRequest,
     _codex_backend_debate,
     _upstream_tradingagents_symbol,
+    apply_tradingagents_preset_env,
     build_decision_packet,
     build_desk_evidence_pack,
     decision_packet_sections,
@@ -47,6 +50,33 @@ def test_load_tradingagents_config_defaults_to_repo_local_disabled_state(tmp_pat
     assert config.llm_backend == "api"
     assert config.codex_model == "gpt-5.4"
     assert config.codex_profile is None
+    assert config.output_language == "English"
+    assert config.analysts == ("market", "news", "fundamentals")
+    assert config.research_depth == 1
+
+
+def test_openrouter_hy3_preset_enables_python_api_defaults(tmp_path: pathlib.Path) -> None:
+    env = apply_tradingagents_preset_env(
+        {
+            "TRADINGAGENTS_RESULTS_DIR": str(tmp_path / "results"),
+            "TRADINGAGENTS_CACHE_DIR": str(tmp_path / "cache"),
+            "TRADINGAGENTS_MEMORY_DIR": str(tmp_path / "memory"),
+        },
+        TRADINGAGENTS_HY3_PRESET,
+        today=dt.date(2026, 6, 18),
+    )
+
+    config = load_tradingagents_config(ROOT, env=env, runtime_env={})
+
+    assert env["TRADINGAGENTS_ANALYSIS_DATE"] == "2026-06-18"
+    assert config.enabled is True
+    assert config.llm_backend == "api"
+    assert config.llm_provider == "openrouter"
+    assert config.quick_model == TRADINGAGENTS_HY3_MODEL
+    assert config.deep_model == TRADINGAGENTS_HY3_MODEL
+    assert config.output_language == "English"
+    assert config.analysts == ("market", "news", "fundamentals")
+    assert config.research_depth == 1
 
 
 def test_upstream_tradingagents_symbol_strips_us_prefix_for_yfinance_path() -> None:
@@ -211,7 +241,39 @@ def test_run_tradingagents_debate_requires_enablement_for_live_path() -> None:
         )
 
 
+def test_openrouter_hy3_live_path_reports_missing_openrouter_key(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: pathlib.Path,
+) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    now = dt.datetime(2026, 6, 18, 9, 30, tzinfo=dt.timezone.utc)
+    evidence_pack = build_desk_evidence_pack(
+        FixtureOptionsResearchProvider(),
+        OptionsResearchRequest(symbol="US.TEST"),
+        now=now,
+    )
+    env = apply_tradingagents_preset_env(
+        {
+            "TRADINGAGENTS_RESULTS_DIR": str(tmp_path / "results"),
+            "TRADINGAGENTS_CACHE_DIR": str(tmp_path / "cache"),
+            "TRADINGAGENTS_MEMORY_DIR": str(tmp_path / "memory"),
+        },
+        TRADINGAGENTS_HY3_PRESET,
+        today=dt.date(2026, 6, 18),
+    )
+    config = load_tradingagents_config(ROOT, env=env, runtime_env={})
+
+    with pytest.raises(TradingAgentsIntegrationError, match="OPENROUTER_API_KEY"):
+        run_tradingagents_debate(
+            config,
+            TradingAgentsPacketRequest(symbol="US.TEST", analysis_date=env["TRADINGAGENTS_ANALYSIS_DATE"]),
+            evidence_pack,
+            fixture=False,
+        )
+
+
 def test_run_tradingagents_debate_reports_missing_dependency_actionably(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-test-key")
     now = dt.datetime(2026, 5, 3, 9, 30, tzinfo=dt.timezone.utc)
     evidence_pack = build_desk_evidence_pack(
         FixtureOptionsResearchProvider(),

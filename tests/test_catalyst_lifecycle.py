@@ -40,6 +40,9 @@ def test_catalyst_idea_records_capture_evidence_and_lifecycle_state() -> None:
     assert {record.evidence_status for record in records} <= {"confirmed", "unmapped"}
     assert any(record.evidence_status == "unmapped" for record in records)
     assert any(record.evidence_status == "confirmed" for record in records)
+    assert all(record.strategy_verdict == "selected" for record in records)
+    assert all(record.strategy_structure != "no_trade" for record in records)
+    assert all(record.strategy_max_loss > 0 for record in records)
 
 
 def test_lifecycle_reviews_include_backtest_stats_and_exit_rule_flags() -> None:
@@ -71,6 +74,19 @@ def test_advisor_deliberation_passes_complete_research_only_artifact() -> None:
     assert "Research only, not a trading instruction." in artifact.risk_note
 
 
+def test_advisor_deliberation_fails_rejected_pricing_verdict() -> None:
+    report = _fixture_report()
+    records = catalyst_records_from_report(report)
+    rejected = (records[0].__class__(**{**records[0].__dict__, "research_verdict": "Reject"}), *records[1:])
+    reviews = build_lifecycle_reviews(rejected)
+    artifact = build_screen_artifact(report, rejected, reviews)
+
+    deliberation = build_advisor_deliberation(artifact)
+
+    assert deliberation.verdict == "FAIL"
+    assert "no_rejected_pricing" in deliberation.blockers
+
+
 def test_advisor_report_sections_surface_lifecycle_and_backtest_context() -> None:
     report = _fixture_report()
     records = catalyst_records_from_report(report)
@@ -83,4 +99,4 @@ def test_advisor_report_sections_surface_lifecycle_and_backtest_context() -> Non
 
     assert "Advisor Deliberation" in titles
     assert "Lifecycle Review Queue" in titles
-    assert "Backtest Evidence" in titles
+    assert "Simulation Evidence" in titles

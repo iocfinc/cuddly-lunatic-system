@@ -33,6 +33,20 @@ from quant_researcher_desk.options_research import (
 )
 
 TRADINGAGENTS_DEFAULT_ANALYSTS = ["market", "news", "fundamentals"]
+TRADINGAGENTS_HY3_PRESET = "openrouter-hy3-current-options-underlying"
+TRADINGAGENTS_HY3_MODEL = "tencent/hy3-preview"
+TRADINGAGENTS_PRESETS: dict[str, dict[str, str]] = {
+    TRADINGAGENTS_HY3_PRESET: {
+        "TRADINGAGENTS_ENABLED": "true",
+        "TRADINGAGENTS_LLM_BACKEND": "api",
+        "TRADINGAGENTS_LLM_PROVIDER": "openrouter",
+        "TRADINGAGENTS_QUICK_MODEL": TRADINGAGENTS_HY3_MODEL,
+        "TRADINGAGENTS_DEEP_MODEL": TRADINGAGENTS_HY3_MODEL,
+        "TRADINGAGENTS_OUTPUT_LANGUAGE": "English",
+        "TRADINGAGENTS_ANALYSTS": ",".join(TRADINGAGENTS_DEFAULT_ANALYSTS),
+        "TRADINGAGENTS_RESEARCH_DEPTH": "1",
+    },
+}
 
 
 class TradingAgentsIntegrationError(Exception):
@@ -74,6 +88,11 @@ class TradingAgentsConfig:
     codex_model: str
     codex_profile: str | None
     source_dir: pathlib.Path | None = None
+    quick_model: str | None = None
+    deep_model: str | None = None
+    output_language: str = "English"
+    analysts: tuple[str, ...] = tuple(TRADINGAGENTS_DEFAULT_ANALYSTS)
+    research_depth: int = 1
 
 
 @dataclass(frozen=True)
@@ -124,6 +143,42 @@ def _real_user_home() -> pathlib.Path:
     return pathlib.Path(pwd.getpwuid(os.getuid()).pw_dir)
 
 
+def _parse_tradingagents_analysts(value: str | None) -> tuple[str, ...]:
+    if not value:
+        return tuple(TRADINGAGENTS_DEFAULT_ANALYSTS)
+    analysts = tuple(item.strip().lower() for item in value.split(",") if item.strip())
+    return analysts or tuple(TRADINGAGENTS_DEFAULT_ANALYSTS)
+
+
+def _parse_positive_int(value: str | None, default: int = 1) -> int:
+    if not value:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError:
+        return default
+    return parsed if parsed > 0 else default
+
+
+def apply_tradingagents_preset_env(
+    env: dict[str, str],
+    preset: str | None,
+    today: dt.date | None = None,
+) -> dict[str, str]:
+    values = dict(env)
+    if not preset:
+        return values
+    try:
+        preset_values = TRADINGAGENTS_PRESETS[preset]
+    except KeyError as exc:
+        valid = ", ".join(sorted(TRADINGAGENTS_PRESETS))
+        raise TradingAgentsIntegrationError(f"Unknown TradingAgents preset: {preset}. Valid presets: {valid}") from exc
+    values.update(preset_values)
+    if today and not values.get("TRADINGAGENTS_ANALYSIS_DATE"):
+        values["TRADINGAGENTS_ANALYSIS_DATE"] = today.isoformat()
+    return values
+
+
 def load_tradingagents_config(
     root: pathlib.Path,
     env: dict[str, str] | None = None,
@@ -145,6 +200,11 @@ def load_tradingagents_config(
         llm_backend=env_values.get("TRADINGAGENTS_LLM_BACKEND", "api").strip().lower() or "api",
         codex_model=env_values.get("TRADINGAGENTS_CODEX_MODEL", "gpt-5.4"),
         codex_profile=(env_values.get("TRADINGAGENTS_CODEX_PROFILE") or "").strip() or None,
+        quick_model=(env_values.get("TRADINGAGENTS_QUICK_MODEL") or env_values.get("ABACUS_QUICK_MODEL") or "").strip() or None,
+        deep_model=(env_values.get("TRADINGAGENTS_DEEP_MODEL") or env_values.get("ABACUS_DEEP_MODEL") or "").strip() or None,
+        output_language=(env_values.get("TRADINGAGENTS_OUTPUT_LANGUAGE") or "English").strip() or "English",
+        analysts=_parse_tradingagents_analysts(env_values.get("TRADINGAGENTS_ANALYSTS")),
+        research_depth=_parse_positive_int(env_values.get("TRADINGAGENTS_RESEARCH_DEPTH"), default=1),
     )
 
 
@@ -429,6 +489,12 @@ def _api_backend_debate(
     packet_request: TradingAgentsPacketRequest,
     evidence_pack: DeskEvidencePack,
 ) -> AgentDebateResult:
+    required_key = _required_llm_env_key(config.llm_provider)
+    if required_key and not os.environ.get(required_key):
+        raise TradingAgentsIntegrationError(
+            f"TradingAgents requires {required_key} for llm_provider={config.llm_provider}."
+        )
+
     try:
         if config.source_dir and str(config.source_dir) not in sys.path:
             sys.path.insert(0, str(config.source_dir))
@@ -440,12 +506,6 @@ def _api_backend_debate(
             f"at ref {config.ref} and retry."
         ) from exc
 
-    required_key = _required_llm_env_key(config.llm_provider)
-    if required_key and not os.environ.get(required_key):
-        raise TradingAgentsIntegrationError(
-            f"TradingAgents requires {required_key} for llm_provider={config.llm_provider}."
-        )
-
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     config.memory_dir.mkdir(parents=True, exist_ok=True)
     config.results_dir.mkdir(parents=True, exist_ok=True)
@@ -456,11 +516,16 @@ def _api_backend_debate(
     tradingagents_config = DEFAULT_CONFIG.copy()
     tradingagents_config["llm_provider"] = config.llm_provider
     tradingagents_config["checkpoint_enabled"] = False
-    tradingagents_config["deep_think_llm"] = tradingagents_config.get("deep_think_llm")
-    tradingagents_config["quick_think_llm"] = tradingagents_config.get("quick_think_llm")
+    if config.deep_model:
+        tradingagents_config["deep_think_llm"] = config.deep_model
+    if config.quick_model:
+        tradingagents_config["quick_think_llm"] = config.quick_model
+    tradingagents_config["output_language"] = config.output_language
+    tradingagents_config["max_debate_rounds"] = config.research_depth
+    tradingagents_config["max_risk_discuss_rounds"] = config.research_depth
 
     graph = TradingAgentsGraph(
-        selected_analysts=TRADINGAGENTS_DEFAULT_ANALYSTS,
+        selected_analysts=list(config.analysts),
         debug=False,
         config=tradingagents_config,
     )
